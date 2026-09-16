@@ -32,7 +32,32 @@ simulator's output (`rodsim scene drape|grid`, then
 
 ---
 
-## A real application: will this cable stay on the hook?
+## A robot learns to route a wire harness
+
+<img src="docs/media/harness.gif" alt="A grid of 256 simulated cable routings turning from red to green as the robot learns, then a robot arm routing a soft and a stiff cable under a peg, over a peg and through a clip">
+
+Car and aircraft wiring looms are still largely routed by hand. A worker pulls
+each cable along a board, around pegs and into clips. Automating it is hard
+because **the cable is the part you cannot predict**. A motion that routes one
+cable leaves the next one in a slack loop.
+
+Here a robot arm must lay a 1.2 m cable **under peg A, over peg B and through a
+clip**. It learns the motion in simulation:
+
+- Each round tries **1024 motions, each on a different random cable** (stiffness
+  0.4–4×, friction 0.6–1.4×), all simulated at once on the GPU. It keeps the
+  best 10% and tries again.
+- **2% → 86%** of attempts routed in 10 rounds, **127 seconds** on one laptop GPU.
+- The learned motion routes **1024 of 1024 new random cables**. A reasonable
+  hand-written motion routes **0**.
+- The GPU's verdicts match a double-precision CPU reference on the extreme cables.
+
+Full video: `python tools/make_harness_video.py` (≈50 s, 1280×720). The case runs as
+`rodsim harness-learning`. Details are in [the writeup](docs/writeup.md#7-application-a-robot-learns-to-route-a-wire-harness).
+
+---
+
+## Another application: will this cable stay on the hook?
 
 A robot, or a person, drapes a cable over a hook and lets go. The robot controls
 **where it grasps the cable**, which sets how much hangs on each side. It does not

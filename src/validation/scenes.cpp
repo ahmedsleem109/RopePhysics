@@ -442,8 +442,16 @@ int sceneHarness(const std::string& outDir) {
         std::fclose(pf);
         std::printf("harness: replaying %s/harness.policy\n", outDir.c_str());
     }
-    Rod rod = task.build();
-    const CollisionWorld world = task.world();
+    // And the cable, if <outDir>/harness.cable exists: "youngsScale frictionScale".
+    double youngsScale = 1, frictionScale = 1;
+    if (std::FILE* cf = std::fopen((outDir + "/harness.cable").c_str(), "r")) {
+        if (std::fscanf(cf, "%lf %lf", &youngsScale, &frictionScale) != 2)
+            youngsScale = frictionScale = 1;
+        std::fclose(cf);
+        std::printf("harness: cable stiffness x%.2f, friction x%.2f\n", youngsScale, frictionScale);
+    }
+    Rod rod = task.build(Real(youngsScale));
+    const CollisionWorld world = task.world(Real(frictionScale));
     SolverParams p = task.params();
     SolverContext ctx;
 

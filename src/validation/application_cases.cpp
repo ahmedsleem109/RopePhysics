@@ -445,6 +445,9 @@ CaseResult runHarnessLearning(const std::string& outDir) {
     const auto handOutcomes = attemptsOnGpu(task, freshHand);
     const double learnedRate = successRate(learnedOutcomes);
     const double handRate = successRate(handOutcomes);
+    Csv evaluation(outDir, "harness_evaluation.csv", "policy,success_rate,attempts,learning_seconds");
+    evaluation.row("learned", learnedRate, population, learnSeconds);
+    evaluation.row("hand_written", handRate, population, learnSeconds);
     allRan = allRan && learnedOutcomes.size() == fresh.size() && handOutcomes.size() == fresh.size();
 
     // CPU cross-check on the softest and stiffest fresh cables under each motion.
