@@ -12,6 +12,7 @@ add_library(crs_core
   src/core/coloring.cpp
   src/core/rod.cpp
   src/core/solver.cpp
+  src/core/statics.cpp
 )
 target_include_directories(crs_core PUBLIC src)
 

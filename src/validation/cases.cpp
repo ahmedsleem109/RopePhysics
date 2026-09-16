@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "../core/solver.h"
+#include "../core/statics.h"
 #include "support.h"
 
 namespace crs {
@@ -71,8 +72,11 @@ double logLogSlope(const std::vector<double>& xs, const std::vector<double>& ys)
 // needs a sweep budget of that order before the tip load is felt at the root.
 //
 // This case sweeps the (substeps x iterations) budget at fixed mesh resolution
-// and reports where the answer stops moving. It is the case that justifies the
-// settings every other static case uses.
+// and checks the richest budget against the direct static solve of the same
+// discrete rod (statics.h). The mesh-convergence cases use that direct solve,
+// so this is the link that says the XPBD solver actually reaches the
+// equilibrium they validate. Self-consistency alone is not enough: an
+// under-swept relaxation settles, stops moving, and is wrong.
 CaseResult runSolverConvergence(const std::string& outDir) {
     CaseResult res;
     res.name = "solver parameter convergence (static tip deflection)";
@@ -84,7 +88,13 @@ CaseResult runSolverConvergence(const std::string& outDir) {
     const int n = 32;
 
     Csv csv(outDir, "solver_convergence.csv",
-            "segments,substeps,iterations,budget,tip_deflection,steps,converged");
+            "segments,substeps,iterations,budget,tip_deflection,direct_tip,rel_gap,steps,converged");
+
+    Rod direct = makeStraightRod(n, L, mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
+    clampRootExact(direct);
+    direct.state.extForce.back() = Vec3(0, 0, -P);
+    const StaticReport directRep = solveStatic(direct);
+    const double directTip = -direct.state.x.back().z;
 
     const std::vector<int> substepList = {1, 4, 16};
     const std::vector<int> iterList = {1, 4, 16, 64};
@@ -101,15 +111,19 @@ CaseResult runSolverConvergence(const std::string& outDir) {
             p.iterations = iter;
             const RelaxReport rep = relaxToEquilibrium(rod, p, 4000, Real(1e-10));
             const double tip = -rod.state.x.back().z;
-            csv.row(n, sub, iter, sub * iter, tip, rep.steps, rep.converged ? 1 : 0);
+            csv.row(n, sub, iter, sub * iter, tip, directTip, std::abs(tip - directTip) / directTip,
+                    rep.steps, rep.converged ? 1 : 0);
             prev = finest;
             finest = tip;
         }
     }
 
-    res.notes.push_back(fmt("  n=%.0f, richest budget tip = %.6g m (previous budget %.6g m)",
+    res.notes.push_back(fmt("  n=%.0f, richest budget tip = %.9g m (previous budget %.9g m)",
                             double(n), finest, prev));
+    res.notes.push_back(fmt("  direct static solve tip = %.9g m", directTip));
+    if (!directRep.converged) res.notes.push_back("  direct static solve did not converge");
     res.checks.push_back(makeCheck("tip deflection settled across budget", finest, prev, 0.01));
+    res.checks.push_back(makeCheck("XPBD relaxation vs direct static solve", finest, directTip, 1e-6));
     return res;
 }
 
@@ -119,7 +133,8 @@ CaseResult runSolverConvergence(const std::string& outDir) {
 //   Euler-Bernoulli:  delta = P L^3 / (3 EI)
 //   Timoshenko:       delta = P L^3 / (3 EI) + P L / (kappa G A)
 // The Cosserat rod is shearable, so Timoshenko is what the discrete model
-// actually converges to; Euler-Bernoulli is the headline number.
+// actually converges to -- at second order, to 7.6e-6 at n = 256 -- and
+// Euler-Bernoulli is the headline number.
 CaseResult runCantilever(const std::string& outDir) {
     CaseResult res;
     res.name = "cantilever (Euler-Bernoulli convergence)";
@@ -127,31 +142,31 @@ CaseResult runCantilever(const std::string& outDir) {
     const RodMaterial mat = referenceMaterial();
     const Real L = Real(1);
     const Real EI = mat.bendStiffness();
-    const Real targetRatio = Real(0.005);  // tip deflection / L, deep in the linear regime
+    // Tip deflection / L. Small enough that the geometric nonlinearity of the
+    // discrete model (relative size ~ ratio^2) stays below the discretization
+    // error at the finest mesh; at 0.005 it floored the convergence by n = 64.
+    const Real targetRatio = Real(1e-4);
     const Real P = Real(3) * EI * targetRatio * L / (L * L * L);
 
     const double deltaEB = P * L * L * L / (3 * EI);
     const double deltaTim = deltaEB + P * L / (mat.shearCorrection() * mat.shear() * mat.area());
 
-    // Capped at 64: the sweep budget a converged static solve needs grows like
-    // n^2 here (see runSolverConvergence), so finer meshes cost more than they
-    // are worth for a slope that is already unambiguous over five points.
-    const std::vector<int> counts = {4, 8, 16, 32, 64};
+    // Solved directly (statics.h), so refinement costs O(n), not the O(n^2)
+    // sweep budget a converged XPBD relaxation needs.
+    const std::vector<int> counts = {4, 8, 16, 32, 64, 128, 256};
     std::vector<double> hs, errs;
     double finestEB = 0;
 
     Csv csv(outDir, "cantilever_convergence.csv",
-            "segments,h,tip_deflection,euler_bernoulli,timoshenko,rel_err_eb,rel_err_tim,steps,"
-            "converged");
+            "segments,h,tip_deflection,euler_bernoulli,timoshenko,rel_err_eb,rel_err_tim,"
+            "newton_iterations,converged");
 
     for (int n : counts) {
         Rod rod = makeStraightRod(n, L, mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
         clampRootExact(rod);
         rod.state.extForce.back() = Vec3(0, 0, -P);
 
-        // omega_1 = 3.516 sqrt(EI / (rho A L^4)); damp at about 2 omega_1.
-        const RelaxReport rep = relaxToEquilibrium(rod, staticParams(rod, 2 * cantileverOmega1(mat, L)),
-                                                   20000, Real(1e-10));
+        const StaticReport rep = solveStatic(rod);
 
         const double tip = -rod.state.x.back().z;
         const double errEB = std::abs(tip - deltaEB) / deltaEB;
@@ -160,8 +175,9 @@ CaseResult runCantilever(const std::string& outDir) {
         errs.push_back(errTim);
         finestEB = errEB;
 
-        csv.row(n, L / n, tip, deltaEB, deltaTim, errEB, errTim, rep.steps, rep.converged ? 1 : 0);
-        if (!rep.converged) res.notes.push_back(fmt("  n=%.0f did not reach the residual tolerance", n));
+        csv.row(n, L / n, tip, deltaEB, deltaTim, errEB, errTim, rep.newtonIterations,
+                rep.converged ? 1 : 0);
+        if (!rep.converged) res.notes.push_back(fmt("  n=%.0f: static solve did not converge", n));
     }
 
     const double slope = logLogSlope(hs, errs);
@@ -169,9 +185,31 @@ CaseResult runCantilever(const std::string& outDir) {
     res.notes.push_back(fmt("  P = %.6g N, delta_EB = %.6g m, delta_Timoshenko = %.6g m", P, deltaEB,
                             deltaTim));
 
+    // Frame invariance: the same rod and load, turned to an oblique axis, must
+    // deflect by the same amount. This is the check that would have caught the
+    // stretch constraint once measuring its strain in world components (see
+    // solver.cpp), which only an axis-aligned rod along z got right.
+    {
+        const int n = 32;
+        const Vec3 axis = normalize(Vec3(1, 2, 3));
+        const Vec3 loadDir = normalize(cross(axis, Vec3(1, 0, 0)));
+        auto tipAlong = [&](Vec3 dir, Vec3 load) {
+            Rod rod = makeStraightRod(n, L, mat, Vec3(0, 0, 0), dir);
+            clampRootExact(rod);
+            rod.state.extForce.back() = load * P;
+            solveStatic(rod);
+            return dot(rod.state.x.back(), load);
+        };
+        const double aligned = tipAlong(Vec3(1, 0, 0), Vec3(0, 0, -1));
+        const double oblique = tipAlong(axis, loadDir);
+        res.checks.push_back(makeCheck("same deflection on an oblique axis", oblique, aligned, 1e-9));
+    }
+
     res.checks.push_back(
         makeCheck("tip deflection vs Euler-Bernoulli (finest mesh)", finestEB, 0.0, 0.01, 1.0));
-    res.checks.push_back(makeRangeCheck("convergence order in h", slope, 0.9, 2.5));
+    res.checks.push_back(makeCheck("tip deflection vs Timoshenko (finest mesh)", errs.back(), 0.0,
+                                   2e-5, 1.0));
+    res.checks.push_back(makeRangeCheck("convergence order in h", slope, 1.8, 2.2));
     return res;
 }
 
@@ -191,14 +229,15 @@ CaseResult runElasticaMoment(const std::string& outDir) {
     const Real M = EI * kappa;
     const double Rref = 1.0 / kappa;
 
-    // Capped at 32: a full end moment on one small segment forces a very small
-    // predictor step (see stableSubsteps), so each refinement costs far more
-    // here than in the force-loaded cases.
-    const std::vector<int> counts = {8, 16, 32};
+    // Solved directly with load continuation (statics.h). The XPBD relaxation
+    // this used to take capped the sweep at n = 32, because a full end moment
+    // on one small segment forces a very small predictor step.
+    const std::vector<int> counts = {8, 16, 32, 64, 128};
     std::vector<double> hs, errs;
     double finestErr = 0;
 
-    Csv csv(outDir, "elastica_moment.csv", "segments,h,radius,radius_ref,rel_err,steps,converged");
+    Csv csv(outDir, "elastica_moment.csv",
+            "segments,h,radius,radius_ref,rel_err,load_steps,newton_iterations,converged");
 
     for (int n : counts) {
         Rod rod = makeStraightRod(n, L, mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
@@ -208,8 +247,8 @@ CaseResult runElasticaMoment(const std::string& outDir) {
         clampRootExact(rod);
         rod.state.extTorque[lastSeg] = Vec3(0, -M, 0);  // bends the rod up, in the x-z plane
 
-        const RelaxReport rep = relaxToEquilibrium(
-            rod, staticParams(rod, 2 * cantileverOmega1(mat, L)), 40000, Real(1e-10));
+        const StaticReport rep = solveStatic(rod);
+        if (!rep.converged) res.notes.push_back(fmt("  n=%.0f: static solve did not converge", n));
 
         // Arc radius from the total turning of the material frame: the rod is a
         // regular polygon inscribed in the arc, so measuring the turn per unit
@@ -224,7 +263,8 @@ CaseResult runElasticaMoment(const std::string& outDir) {
         hs.push_back(L / n);
         errs.push_back(err);
         finestErr = err;
-        csv.row(n, L / n, radius, Rref, err, rep.steps, rep.converged ? 1 : 0);
+        csv.row(n, L / n, radius, Rref, err, rep.loadSteps, rep.newtonIterations,
+                rep.converged ? 1 : 0);
     }
 
     const double slope = logLogSlope(hs, errs);
@@ -249,7 +289,7 @@ struct ElasticaRef {
     double tipX = 0, tipZ = 0, tipAngle = 0;
 };
 
-ElasticaRef solveElasticaRef(double P, double L, double EI, int steps = 200000) {
+ElasticaRef solveElasticaRef(double P, double L, double EI, int steps = 20000) {
     const double a = P / EI;
     auto shoot = [&](double kappa0, ElasticaRef* out) {
         const double ds = L / steps;
@@ -277,7 +317,7 @@ ElasticaRef solveElasticaRef(double P, double L, double EI, int steps = 200000) 
 
     // theta'(L) grows monotonically with the shooting parameter, so bisect.
     double lo = 0, hi = 10 * a * L + 10;
-    for (int i = 0; i < 200; ++i) {
+    for (int i = 0; i < 64; ++i) {  // halves a bracket of O(10) past double precision
         const double mid = 0.5 * (lo + hi);
         if (shoot(mid, nullptr) > 0)
             hi = mid;
@@ -304,7 +344,7 @@ CaseResult runElasticaTipLoad(const std::string& outDir) {
     const int n = 32;
 
     Csv csv(outDir, "elastica_tipload.csv",
-            "alpha,load,tip_x,tip_z,ref_x,ref_z,err_x,err_z,err_dist,steps,converged");
+            "alpha,load,tip_x,tip_z,ref_x,ref_z,err_x,err_z,err_dist,newton_iterations,converged");
 
     double worst = 0;
     for (double alpha : alphas) {
@@ -313,8 +353,9 @@ CaseResult runElasticaTipLoad(const std::string& outDir) {
         clampRootExact(rod);
         rod.state.extForce.back() = Vec3(0, 0, -P);
 
-        const RelaxReport rep = relaxToEquilibrium(
-            rod, staticParams(rod, 2 * cantileverOmega1(mat, L)), 40000, Real(1e-10));
+        const StaticReport rep = solveStatic(rod);
+        if (!rep.converged)
+            res.notes.push_back(fmt("  alpha=%.1f: static solve did not converge", alpha));
 
         const ElasticaRef ref = solveElasticaRef(P, L, EI);
         const double tipX = rod.state.x.back().x, tipZ = rod.state.x.back().z;
@@ -323,7 +364,7 @@ CaseResult runElasticaTipLoad(const std::string& outDir) {
         const double dist = std::sqrt((tipX - ref.tipX) * (tipX - ref.tipX) +
                                       (tipZ - ref.tipZ) * (tipZ - ref.tipZ)) / L;
         worst = std::max(worst, dist);
-        csv.row(alpha, P, tipX, tipZ, ref.tipX, ref.tipZ, errX, errZ, dist, rep.steps,
+        csv.row(alpha, P, tipX, tipZ, ref.tipX, ref.tipZ, errX, errZ, dist, rep.newtonIterations,
                 rep.converged ? 1 : 0);
     }
 
