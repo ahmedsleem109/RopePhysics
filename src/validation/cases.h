@@ -63,9 +63,8 @@ CaseResult runGpuDeterminism(const std::string& outDir);   // bitwise, run to ru
 CaseResult runGpuThroughput(const std::string& outDir);    // scaling curves
 
 // Phase 4: scale and characterization.
-CaseResult runStabilityEnvelope(const std::string& outDir);  // dt vs stiffness vs substeps
-CaseResult runThroughput(const std::string& outDir);         // batched CPU rod-segment-steps/s
-CaseResult runFailureStudy(const std::string& outDir);       // the real timestep limit
+CaseResult runTimestepEnvelope(const std::string& outDir);  // largest accurate substep
+CaseResult runThroughput(const std::string& outDir);        // batched CPU segment-substeps/s
 
 // Dumps a short, fully deterministic trajectory for tools/reference_prototype.py
 // to reproduce. Cross-implementation agreement on the solver map is a stronger

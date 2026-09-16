@@ -384,54 +384,26 @@ def annotate_heatmap(ax, grid):
                     color="#ffffff" if dark_cell else "#0b0b0b")
 
 
-def plot_stability(data, figs):
-    d = read(os.path.join(data, "stability_envelope.csv"))
-    if "sweeps" not in d:
-        return
-    rows = list(zip(d["youngs"], d["substeps"], d["iterations"], d["max_dt"]))
-    es = sorted({r[0] for r in rows if r[2] == 1})
-    subs = sorted({r[1] for r in rows if r[2] == 1})
-    grid = np.full((len(es), len(subs)), np.nan)
-    for e, s, it, dt in rows:
-        if it == 1:
-            grid[es.index(e), subs.index(s)] = dt
-
-    fig, (ax0, ax1) = new_fig(10.0, 3.9, 2)
-    ax0.imshow(np.log10(grid), cmap=T["seq"], aspect="auto", origin="lower")
-    ax0.set_xticks(range(len(subs)), [str(int(s)) for s in subs])
-    ax0.set_yticks(range(len(es)), [f"1e{int(round(math.log10(e)))}" for e in es])
-    annotate_heatmap(ax0, grid)
-    style(ax0, "Largest bounded dt [s]: flat in stiffness", "substeps", "Young's modulus [Pa]")
-    ax0.grid(False)
-
-    base = sorted((r[1], r[3]) for r in rows if r[0] == 1e7 and r[2] == 1)
-    iters = sorted((r[2], r[3]) for r in rows if r[0] == 1e7 and r[1] == 1)
-    ax1.loglog(*zip(*base), "o-", color=T["series"][0], linewidth=2, markersize=6,
-               label="sweeps spent as substeps")
-    ax1.loglog(*zip(*iters), "s-", color=T["series"][1], linewidth=2, markersize=5,
-               label="sweeps spent as iterations")
-    style(ax1, "The limit tracks total sweeps per step", "Gauss-Seidel sweeps per step",
-          "largest bounded dt [s]")
-    legend(ax1)
-    save(fig, figs, "stability_envelope.png")
-
-
-def plot_failure(data, figs):
-    d = read(os.path.join(data, "failure_study.csv"))
-    fig, ax = new_fig()
-    splits = sorted({(s, i) for s, i in zip(d["substeps"], d["iterations"])})
-    for k, (s, i) in enumerate(splits):
-        pts = sorted((n, e) for n, e, ss, ii in zip(d["segments"], d["elements_per_sweep"],
-                                                    d["substeps"], d["iterations"])
-                     if ss == s and ii == i)
-        if pts:
-            ax.semilogx(*zip(*pts), "o-", color=T["series"][k], linewidth=2, markersize=6,
-                        base=2, label=f"{int(s)} substep{'s' if s != 1 else ''}, "
-                                      f"{int(i)} iteration{'s' if i != 1 else ''}")
-    ax.set_ylim(bottom=0)
-    style(ax, "At breakdown: motion per sweep", "segments", "element lengths moved per sweep")
-    legend(ax)
-    save(fig, figs, "failure_study.png")
+def plot_timestep_envelope(data, figs):
+    d = read(os.path.join(data, "timestep_envelope.csv"))
+    rows = list(zip(d["youngs"], d["segments"], d["iterations"], d["max_substep"],
+                    d["max_dt_per_sweep"], d["elements_per_substep"]))
+    stiffness = sorted(set(d["youngs"]))
+    fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
+    for k, E in enumerate(stiffness):
+        pts = sorted((n, h * 1e3) for e, n, it, h, _, _ in rows if e == E and it == 1)
+        ax0.loglog(*zip(*pts), "o-", color=T["series"][k], linewidth=2, markersize=6, base=2,
+                   label=f"E = {E:.0e} Pa")
+    ax0.set_yscale("log", base=10)
+    style(ax0, "Largest substep keeping strain under 1%", "segments", "substep h [ms]")
+    legend(ax0)
+    for k, E in enumerate(stiffness):
+        pts = sorted((n, m) for e, n, it, _, _, m in rows if e == E and it == 1)
+        ax1.semilogx(*zip(*pts), "o-", color=T["series"][k], linewidth=2, markersize=6, base=2,
+                     label=f"E = {E:.0e} Pa")
+    ax1.set_ylim(0, 0.05)
+    style(ax1, "At the limit: motion per substep", "segments", "element lengths moved per substep")
+    save(fig, figs, "timestep_envelope.png")
 
 
 PLOTS = {
@@ -447,8 +419,7 @@ PLOTS = {
     "self_collision.csv": plot_self_collision,
     "throughput_cpu.csv": plot_throughput,
     "gpu_throughput.csv": plot_throughput_gpu,
-    "stability_envelope.csv": plot_stability,
-    "failure_study.csv": plot_failure,
+    "timestep_envelope.csv": plot_timestep_envelope,
 }
 
 

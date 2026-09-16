@@ -395,61 +395,57 @@ loads still exist only on the CPU.
 
 ---
 
-## 6. Stability and the failure study
+## 6. How large a timestep is accurate
 
-> **Withdrawn.** Everything in this section was measured before the
-> stretch/shear constraint was moved into the material frame (§2). Rerun after
-> that fix, the stable timesteps rose 5–20×, the tight "0.66 elements per sweep"
-> collapse became a 16× spread, and boundedness stopped being monotone in `dt`: a
-> 128-segment rod blows up at 1 ms yet survives 3–10 ms. Tracing runs near the
-> limit in both versions shows why none of it measured usable behaviour: with one
-> sweep per step the constraints were barely solved (axial strain up to 80%, shear
-> up to 265%), and the energy criterion only asked whether that unconverged state
-> eventually exploded. A stability study needs an accuracy criterion (bounded
-> constraint error), not an energy bound. The text below is kept as a record of
-> what was believed and why.
+"XPBD is unconditionally stable" is true in the sense that it rarely explodes,
+and that is exactly why it is the wrong question. A rod can run for ever
+without exploding while stretching like rubber. The useful question is how
+large a substep keeps the rod behaving like the material it was given.
 
-"XPBD is unconditionally stable" is true with respect to constraint stiffness and
-false in general, and the useful question is what the actual limit is.
+**Two earlier answers in this repository were wrong.** The first blamed the
+predictor displacement `h² f / m`. That was inferred and never isolated. The
+second measured the largest timestep before *energy* ran away, and found a
+tidy law: breakdown at 0.66 element lengths of motion per sweep, independent of
+stiffness. That law came from the stretch/shear frame bug (§2). With the bug
+fixed, the same measurement moved 5–20×, and whether a run exploded stopped
+being monotone in `dt`: a 128-segment rod blew up at 1 ms yet survived 3–10 ms.
+Tracing runs near that "limit" showed why it never measured anything useful.
+In both versions the constraints were barely solved: axial strain up to 80%,
+shear up to 265%, and the energy criterion called those runs stable.
 
-**The first answer in this repository was wrong.** Early static cases blew up on
-fine meshes, and I attributed it to the predictor: the unconstrained displacement
-`h² f / m` overshooting an element, since lumped particle mass shrinks with the
-element. A guard function was built around that and documented as the mechanism.
-It was an inference, never isolated.
+**The measurement now.** A cantilever released from horizontal swings down for
+one second. Accuracy is the worst stretch/shear strain anywhere in the rod at
+any time. The physical strain of this motion is small (7e-4 at `E = 1e8`, 5e-5
+at `1e9`), so strain beyond 1% is solver error. Worst strain rises smoothly
+with `dt` in every configuration scanned (`rodexp scan` shows the old criterion
+flipping; a strain scan over the same grid is monotone), so bisection on it
+means something. `E = 1e6` is excluded: that rod strains 4–10% physically in
+this swing, so no timestep meets a 1% tolerance.
 
-The first attempt to measure it was also wrong, differently: the stability sweep
-counted only NaN or runaway positions as failure, never saw a single one, and
-reported its own bisection bound — 0.19999 — as the largest stable timestep in
-every cell. The probe that finally worked uses an energy criterion: a
-gravity-released cantilever cannot gain more kinetic energy than the potential it
-starts with, so exceeding ten times that means energy was injected.
+Only the substep `h` matters, not how substeps are grouped into frames, since a
+frame of four substeps *is* four substeps. The case therefore reports the
+largest accurate `h`.
 
-What it found:
+What it found, over `E = 1e7…1e9` and 16–64 segments:
 
-- **Stiffness does not matter.** Across four decades of Young's modulus, the
-  stable timestep per sweep varies 1.39×.
-- **Sweeps set the limit.** Max dt scales with substeps. Sweeps spent as
-  *iterations* tolerate ~2.6× more timestep than the same sweeps spent as
-  substeps — though substeps remain the more accurate buy.
-- **The limit is kinematic.** At breakdown, material moves **0.66 element
-  lengths per sweep**, with a 1.11× spread across meshes and substep splits
-  (using the physical speed bound `√(2gL)`; the fastest speed seen in the last
-  bounded run was itself inflated by the instability, which is a third way this
-  measurement went wrong before it went right). Iterations push it to ~1.8.
-- **The `h²a/l` group varies fivefold at failure.** It is not the mechanism.
+- **The limit is kinematic.** At the limit, material moves **1.1–3.1% of an
+  element length per substep** (`v h / l`, with `v = √(2gL)`). That is a 2.7×
+  spread across a 4× range of mesh and two decades of stiffness. Refining the rod
+  shrinks the usable substep in proportion to the element length, so refinement
+  costs twice: more segments, and proportionally more substeps.
+- **Stiffer rods tolerate a larger substep, not a smaller one.** From
+  `E = 1e7` to `1e9` the limit grows 1.5× at 16 segments and 2.3–2.5× at 32–64.
+  Implicit compliance is what makes stiffness free.
+- **Iterations versus substeps depends on stiffness.** Four sweeps spent as
+  iterations allow 1.9× the `dt` of four substeps on the softest rod and 0.28×
+  on the stiffest. The case reports this and asserts neither.
 
-The picture that fits: a sweep carries a correction about one element along the
-chain, so when material outruns that, the chain cannot keep up with its own
-motion and corrections overshoot. The practical consequence is that refinement
-costs twice — more segments, and proportionally more sweeps per unit time.
+What is asserted: every configuration is bracketed, and the motion per substep
+at the limit is a few percent of an element within a 4× spread. It is still
+one scenario, a gravity swing. Contact-driven and whipping motion are not
+covered.
 
-The rule stops holding once elements are shorter than the rod's diameter
-(1.5–2.3 elements per sweep at `n = 128`), and it has only been measured on one
-scenario. Both are stated as limits, not smoothed over.
-
-![Stability envelope](figs/stability_envelope.png)
-![Failure study](figs/failure_study.png)
+![Timestep envelope](figs/timestep_envelope.png)
 
 ---
 
@@ -486,8 +482,8 @@ This is the section that matters most, so it is specific.
   (§5), but only for gravity-loaded rods: contacts, self-collision, external
   loads and driven ghost frames are CPU-only, and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
-- **The stability characterization is withdrawn** (§6). There is currently no
-  validated statement of the largest usable timestep.
+- **The timestep envelope is one scenario deep** (§6): a gravity swing, 16–64
+  segments. Contact-driven and whipping motion are not covered.
 - **The demo scenes were simulated before the material-frame fix** and should
   be re-run.
 - **Twist buckling** is first order over n = 12–32 and 2.3% off at the finest
