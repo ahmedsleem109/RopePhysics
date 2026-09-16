@@ -44,6 +44,8 @@ Findings so far:
 - A tuned policy was written to out/scenes/harness.policy but NOT yet run:
   `0.20 -0.06 / 0.40 0.0 / 0.55 0.07 / 0.75 -0.004 / 1.20 -0.008`
   (pull 35 cm past the clip to take up slack; aim slightly -y through the clip).
+  It is committed as docs/data/harness_tuned.policy (out/ is git-ignored): copy
+  it to out/scenes/harness.policy before `rodsim scene harness`.
   Last build of scenes.cpp had an escaped-newline fix applied just before the
   interruption: rebuild first.
 
