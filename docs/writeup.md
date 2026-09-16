@@ -398,8 +398,28 @@ mid-rod torque and a root frame twisted every step. It matches the CPU to
 step, so a device ignoring them would fail. Carrying the loads cost 4% of peak
 throughput and cut the largest fused rod from 472 to 383 segments.
 
-No Nsight profile has been taken yet, and contacts and self-collision still
-exist only on the CPU.
+**Contact with the world.** Primitives and signed distances moved into a
+templated host/device header (`src/core/geometry.h`), so the CPU and the kernels
+share one implementation. Each rod has a fixed slot per (particle, primitive).
+Slots are regenerated at the start of a substep, before prediction, as on the
+CPU, and projected after both constraint colours in every sweep. Contacts on
+different particles share no state, so running particles in parallel, with
+primitives in order within each, is the same Gauss–Seidel sweep the CPU does.
+No contact colouring is needed.
+
+The first parity scenario for this was wrong in an instructive way. It started
+the rod 1 mm *inside* the floor, and the first position correction launched it
+upward at 8 m/s, so it barely touched anything again. The scenario now lets the
+rod settle onto a floor 0.1 mm below and a sphere under its middle, with
+friction. From about step 5 it rests in persistent contacts, up to 106 at 128
+segments. After 200 steps the GPU sits 1.2–1.6e-7 m from the CPU, which is
+exactly the float-vs-double envelope measured for that scenario. By step 50,
+contact has moved the rod 1.3 cm, and the GPU error there is 1.3e-5 of that.
+Contacts against two primitives cost 20% of fused throughput (0.92 B vs 1.15 B
+at 16 384 × 64).
+
+No Nsight profile has been taken yet, and self-collision still exists only on
+the CPU.
 
 ---
 
@@ -487,8 +507,8 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 This is the section that matters most, so it is specific.
 
 - **The GPU path is partial.** Parity, determinism and throughput are measured
-  (§5), including applied loads and driven ends, but contacts and
-  self-collision are CPU-only, and there is no profiler output.
+  (§5), including applied loads, driven ends and world contact, but
+  self-collision is CPU-only, and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
 - **The timestep envelope is one scenario deep** (§6): a gravity swing, 16–64
   segments. Contact-driven and whipping motion are not covered.

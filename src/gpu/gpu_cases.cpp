@@ -145,21 +145,37 @@ CaseResult runGpuParity(const std::string& outDir) {
     // the measured float drift at step 200. The two strategies run the same
     // kernel code in a different launch structure and must agree exactly.
     //
-    // Two scenarios. "gravity" is the benchmark rod swinging under its own
-    // weight. "loaded" adds every other input the GPU accepts: a force on the
-    // tip particle, a torque on the middle segment, and the root's fixed frame
-    // driven round the rod axis a little every step (which is how a twist is
-    // imposed), uploaded to the device through Batch::setLoads.
+    // Three scenarios. "gravity" is the benchmark rod swinging under its own
+    // weight. "loaded" adds a force on the tip particle, a torque on the middle
+    // segment, and the root's fixed frame driven round the rod axis a little
+    // every step (which is how a twist is imposed), uploaded to the device
+    // through Batch::setLoads. "contact" lets the rod settle onto a floor 0.1 mm
+    // below it and onto a sphere under its middle, both with friction; from
+    // about step 5 it rests in 6-11 persistent contacts. (A first version
+    // started the rod 1 mm INSIDE the floor: the first position correction
+    // launched it upward at 8 m/s and it barely touched anything again.)
     Csv csv(outDir, "gpu_parity.csv",
             "scenario,segments,steps,strategy,max_dx,max_dq,ordering_only_dx");
 
     struct Scenario {
         const char* name;
         bool loaded;
+        bool contact;
     };
-    const Scenario scenarios[] = {{"gravity", false}, {"loaded", true}};
+    const Scenario scenarios[] = {
+        {"gravity", false, false}, {"loaded", true, false}, {"contact", false, true}};
     const std::vector<int> checkpoints = {1, 10, 50, 200};
     double worstFirst = 0, worstFinal = 0, strategyGap = 0;
+    std::size_t peakCpuContacts = 0;
+
+    CollisionWorld world;
+    world.primitives.push_back(Primitive::makePlane(Vec3(0, 0, Real(-0.0051)), Vec3(0, 0, 1),
+                                                    Real(0.5)));
+    world.primitives.push_back(Primitive::makeSphere(Vec3(Real(0.5), 0, Real(-0.0851)),
+                                                     Real(0.08), Real(0.3)));
+    // For sizing what contact changes: the gravity run of each mesh at step 50.
+    std::vector<std::pair<int, Rod>> gravityAt50;
+    double contactEffect = 1e9, contactErrorAt50 = 0;
 
     for (const Scenario& sc : scenarios) {
         for (int n : {16, 48, 128}) {
@@ -186,10 +202,19 @@ CaseResult runGpuParity(const std::string& outDir) {
 
             // CPU in the GPU's order, and in index order to size the ordering effect.
             Rod cpuColored = prototype, cpuSequential = prototype;
+            SolverContext ctxColored, ctxSequential;
+            const CollisionWorld* gpuWorld = sc.contact ? &world : nullptr;
+            auto cpuStep = [&](Rod& rod, const SolverParams& params, SolverContext& ctx) {
+                if (sc.contact)
+                    step(rod, params, world, ctx);
+                else
+                    step(rod, params);
+            };
 
             gpu::Batch multi, fused;
-            const bool haveMulti = multi.create(prototype, 1, gpu::Strategy::kMultiKernel);
-            const bool haveFused = fused.create(prototype, 1, gpu::Strategy::kFused);
+            const bool haveMulti =
+                multi.create(prototype, 1, gpu::Strategy::kMultiKernel, gpuWorld);
+            const bool haveFused = fused.create(prototype, 1, gpu::Strategy::kFused, gpuWorld);
             if (!haveFused)
                 res.notes.push_back(fmt("  n=%.0f does not fit the fused path", double(n)));
             const gpu::BatchParams bp = toBatchParams(p);
@@ -204,12 +229,19 @@ CaseResult runGpuParity(const std::string& outDir) {
                         if (haveMulti) multi.setLoads(0, cpuColored);
                         if (haveFused) fused.setLoads(0, cpuColored);
                     }
-                    step(cpuColored, pc);
-                    step(cpuSequential, p);
+                    cpuStep(cpuColored, pc, ctxColored);
+                    cpuStep(cpuSequential, p, ctxSequential);
+                    peakCpuContacts = std::max(peakCpuContacts, ctxColored.contacts.size());
                     if (haveMulti) multi.step(bp);
                     if (haveFused) fused.step(bp);
                 }
                 const double orderingOnly = maxPositionDifference(cpuColored, cpuSequential);
+                if (cp == 50 && !sc.loaded && !sc.contact) gravityAt50.emplace_back(n, cpuColored);
+                if (cp == 50 && sc.contact)
+                    for (const auto& g : gravityAt50)
+                        if (g.first == n)
+                            contactEffect = std::min(contactEffect,
+                                                     maxPositionDifference(g.second, cpuColored));
                 Rod fromMulti = prototype, fromFused = prototype;
                 if (haveMulti) {
                     multi.synchronize();
@@ -228,6 +260,7 @@ CaseResult runGpuParity(const std::string& outDir) {
                     const double dx = maxPositionDifference(cpuColored, g);
                     const double dq = maxOrientationDifference(cpuColored, g);
                     if (cp == checkpoints.front()) worstFirst = std::max(worstFirst, dx);
+                    if (cp == 50 && sc.contact) contactErrorAt50 = std::max(contactErrorAt50, dx);
                     if (cp == checkpoints.back()) {
                         worstFinal = std::max(worstFinal, dx);
                         finalDx = std::max(finalDx, dx);
@@ -267,6 +300,14 @@ CaseResult runGpuParity(const std::string& outDir) {
         makeCheck("GPU drift at 200 steps within float rounding", worstFinal, 0.0, 1e-3, 1.0));
     res.checks.push_back(
         makeCheck("multi-kernel and fused agree exactly", strategyGap, 0.0, 0.0, 1.0));
+    res.notes.push_back(fmt("  contact scenario: up to %.0f simultaneous contacts on the CPU",
+                            double(peakCpuContacts)));
+    res.checks.push_back(makeRangeCheck("contact scenario actually made contact",
+                                        double(peakCpuContacts), 5.0, 1e9));
+    res.notes.push_back(fmt("  by step 50 contact moves the rod %.3g m; GPU-CPU there %.3g m",
+                            contactEffect, contactErrorAt50));
+    res.checks.push_back(makeRangeCheck("GPU contact error under 1% of the contact effect",
+                                        contactErrorAt50 / contactEffect, 0.0, 0.01));
     return res;
 }
 
@@ -348,12 +389,23 @@ CaseResult runGpuThroughput(const std::string& outDir) {
                             double(gpu::maxFusedSegments())));
 
     Csv csv(outDir, "gpu_throughput.csv",
-            "strategy,rods,segments,substeps,steps,seconds,segment_steps_per_sec,launches_per_step");
+            "strategy,rods,segments,substeps,steps,seconds,segment_steps_per_sec,launches_per_step,"
+            "primitives");
 
-    auto measure = [&](gpu::Strategy strat, int rods, int n, int substeps) -> double {
+    // The contact workload: a floor and a sphere under every rod, so every
+    // particle tests two primitives each substep and projects its contacts
+    // each iteration.
+    CollisionWorld world;
+    world.primitives.push_back(Primitive::makePlane(Vec3(0, 0, Real(-0.0051)), Vec3(0, 0, 1),
+                                                    Real(0.5)));
+    world.primitives.push_back(Primitive::makeSphere(Vec3(Real(0.5), 0, Real(-0.0851)),
+                                                     Real(0.08), Real(0.3)));
+
+    auto measure = [&](gpu::Strategy strat, int rods, int n, int substeps,
+                       bool contacts = false) -> double {
         const Rod prototype = makeBenchmarkRod(n);
         gpu::Batch batch;
-        if (!batch.create(prototype, rods, strat)) return 0;
+        if (!batch.create(prototype, rods, strat, contacts ? &world : nullptr)) return 0;
 
         gpu::BatchParams bp = toBatchParams(benchmarkParams());
         bp.substeps = substeps;
@@ -372,7 +424,7 @@ CaseResult runGpuThroughput(const std::string& outDir) {
         const double segmentSteps = double(rods) * n * steps * substeps;
         const double rate = segmentSteps / seconds;
         csv.row(strat == gpu::Strategy::kFused ? "fused" : "multikernel", rods, n, substeps, steps,
-                seconds, rate, batch.launchesPerStep(bp));
+                seconds, rate, batch.launchesPerStep(bp), contacts ? 2 : 0);
         return rate;
     };
 
@@ -386,6 +438,18 @@ CaseResult runGpuThroughput(const std::string& outDir) {
     for (int n : {16, 32, 64, 128, 256})
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused})
             best = std::max(best, measure(strat, 2048, n, 8));
+    // With contacts against two primitives, at the batch-size knee and beyond.
+    double contactRate = 0, plainRate = 0;
+    for (int rods : {1024, 16384})
+        for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused}) {
+            const double r = measure(strat, rods, 64, 8, true);
+            if (rods == 16384 && strat == gpu::Strategy::kFused) contactRate = r;
+        }
+    plainRate = measure(gpu::Strategy::kFused, 16384, 64, 8);
+    res.notes.push_back(fmt("  contacts against 2 primitives cost %.3gx throughput (fused, "
+                            "16384 x 64): %.4g M vs %.4g M segment-substeps/s",
+                            plainRate > 0 ? contactRate / plainRate : 0.0, contactRate / 1e6,
+                            plainRate / 1e6));
     // Substep sweep.
     for (int sub : {1, 2, 4, 8, 16, 32})
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused})

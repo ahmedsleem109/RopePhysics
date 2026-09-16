@@ -37,8 +37,9 @@ compile; they have never executed.
 
 ## 3. GPU features not yet ported
 
-- [ ] Contacts and friction on the GPU (the `Contact` struct is already a flat
-      POD, one projection routine, designed for this).
+- [x] Contacts and friction against primitives on the GPU. Geometry shared via
+      `src/core/geometry.h`; parity scenario "contact" within the float envelope
+      (1.6e-7 m at 200 steps); 20% throughput cost for two primitives.
 - [ ] Self-collision broadphase on the GPU: key kernel → radix sort → cell-start
       scan (CPU version mirrors these stages in `collision.cpp`).
 - [ ] Contact constraints need colouring too: re-colour per step, or use a
