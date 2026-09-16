@@ -11,19 +11,27 @@ const Vec3 kE3(0, 0, 1);
 
 // ---- stretch / shear -------------------------------------------------------
 //
-//   C = (1/l) (x1 - x0) - R(q) e3                                  [3 vector]
+//   C = R(q)^T (x1 - x0) / l - e3                                  [3 vector]
+//
+// C lives in the MATERIAL frame, because that is the frame the compliance
+// diag(shear, shear, axial) is written in. An earlier version measured C in
+// world components, which applied the axial stiffness to whichever world axis
+// happened to be z: a cantilever along x carried EA in shear and converged to
+// a third of the Timoshenko shear deflection, while the same rod along z was
+// correct. The static cantilever sweep to n = 256 is what exposed it.
 //
 // Jacobians, with the orientation perturbed by a BODY-frame rotation vector
-// (q <- q exp(dtheta/2)), so body-frame inverse inertia can be used directly:
+// (q <- q exp(dtheta/2)), so body-frame inverse inertia can be used directly.
+// With u = R^T (x1 - x0) / l, and R^T -> (I - skew(dtheta)) R^T:
 //
-//   dC/dx0 = -I/l        dC/dx1 = +I/l        dC/dtheta = R skew(e3)
+//   dC/dx0 = -R^T/l      dC/dx1 = +R^T/l      dC/dtheta = skew(u)
 //
 // and therefore
 //
-//   J M^-1 J^T = (w0 + w1)/l^2 I + R diag(Iinv_y, Iinv_x, 0) R^T
+//   J M^-1 J^T = (w0 + w1)/l^2 I + skew(u) diag(Iinv) skew(u)^T
 //
-// (the e3 column of the inertia drops out: spinning about the tangent does not
-// move the tangent, which is exactly why twist must come from the bend term).
+// (spinning about the tangent u does not move the tangent, which is exactly
+// why twist must come from the bend term).
 void projectStretch(Rod& rod, Real h, const Coloring* coloring) {
     RodState& s = rod.state;
     StretchConstraints& c = rod.stretch;
@@ -39,11 +47,11 @@ void projectStretch(Rod& rod, Real h, const Coloring* coloring) {
 
         const Real l = c.restLength[k];
         const Quat q = s.q[j];
-        const Mat3 R = toMat3(q);
-        const Vec3 C = (s.x[i1] - s.x[i0]) / l - R.col(2);
+        const Vec3 u = rotateInv(q, s.x[i1] - s.x[i0]) / l;
+        const Vec3 C = u - kE3;
 
         const Vec3 alpha = c.compliance[k] * invH2;
-        Mat3 A = Mat3::identity((w0 + w1) / (l * l)) + sandwichDiag(R, Vec3(iI.y, iI.x, Real(0)));
+        Mat3 A = Mat3::identity((w0 + w1) / (l * l)) + sandwichDiag(Mat3::skew(u), iI);
         A.m[0][0] += alpha.x;
         A.m[1][1] += alpha.y;
         A.m[2][2] += alpha.z;
@@ -52,12 +60,12 @@ void projectStretch(Rod& rod, Real h, const Coloring* coloring) {
         if (!solveSPD3(A, -(C + cwise(alpha, c.lambda[k])), dLambda)) continue;
         c.lambda[k] += dLambda;
 
-        s.x[i0] -= dLambda * (w0 / l);
-        s.x[i1] += dLambda * (w1 / l);
+        const Vec3 world = rotate(q, dLambda);
+        s.x[i0] -= world * (w0 / l);
+        s.x[i1] += world * (w1 / l);
         if (norm2(iI) > Real(0)) {
-            // J_theta^T dLambda = -skew(e3) R^T dLambda = -e3 x (R^T dLambda)
-            const Vec3 body = rotateInv(q, dLambda);
-            s.q[j] = applyBodyDelta(q, cwise(iI, -cross(kE3, body)));
+            // J_theta^T dLambda = skew(u)^T dLambda = dLambda x u
+            s.q[j] = applyBodyDelta(q, cwise(iI, cross(dLambda, u)));
         }
     }
 }

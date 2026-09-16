@@ -66,7 +66,7 @@ struct RodState {
 // ---------------------------------------------------------------- constraints
 //
 // Stretch/shear, one per segment, coupling the two end particles to the frame:
-//     C_s = (1/l) (x_{i+1} - x_i) - R(q_j) e3          [3 components]
+//     C_s = R(q_j)^T (x_{i+1} - x_i) / l - e3          [material frame]
 // Bend/twist, one per interior joint, from the discrete Darboux vector:
 //     C_b = (2/lbar) Im(conj(q_a) q_b) - Omega_0       [3 components]
 //

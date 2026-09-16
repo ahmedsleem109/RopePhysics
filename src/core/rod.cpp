@@ -72,7 +72,7 @@ Real Rod::elasticEnergy() const {
     Real e = 0;
     for (std::size_t k = 0; k < stretch.size(); ++k) {
         const Vec3 d = state.x[stretch.p1[k]] - state.x[stretch.p0[k]];
-        const Vec3 C = d / stretch.restLength[k] - rotate(state.q[stretch.seg[k]], Vec3(0, 0, 1));
+        const Vec3 C = rotateInv(state.q[stretch.seg[k]], d) / stretch.restLength[k] - Vec3(0, 0, 1);
         const Vec3 a = stretch.compliance[k];
         e += Real(0.5) * (C.x * C.x / a.x + C.y * C.y / a.y + C.z * C.z / a.z);
     }
