@@ -7,12 +7,13 @@
 // have supplied has had energy injected by the integrator, which is what
 // "unstable" means. NaN and runaway positions also count.
 //
-//   rodexp <experiment>     gravity | tipload | iterations
+//   rodexp <experiment>     gravity | tipload | iterations | scan
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #include "core/solver.h"
 
@@ -126,8 +127,27 @@ int main(int argc, char** argv) {
                 s.tipLoadAlpha = Real(10);
                 report("tip load, iteration sweep", s);
             }
+    } else if (what == "scan") {
+        // Bisection assumes boundedness is monotone in dt. This checks it: one
+        // row per configuration, B (bounded) or x (blew up) per dt on a log grid.
+        std::printf("dt grid: 1e-3 .. 0.5, 24 log-spaced points\n");
+        for (int n : {16, 32, 64, 128})
+            for (const auto& split : {std::pair<int, int>(1, 1), std::pair<int, int>(4, 1),
+                                      std::pair<int, int>(1, 4)}) {
+                Setup s;
+                s.n = n;
+                s.substeps = split.first;
+                s.iterations = split.second;
+                std::printf("n=%-4d sub=%d it=%d  ", n, split.first, split.second);
+                for (int k = 0; k < 24; ++k) {
+                    const double dt = 1e-3 * std::pow(500.0, k / 23.0);
+                    std::printf("%c", bounded(s, Real(dt)) ? 'B' : 'x');
+                    std::fflush(stdout);
+                }
+                std::printf("\n");
+            }
     } else {
-        std::printf("usage: rodexp gravity|tipload|iterations\n");
+        std::printf("usage: rodexp gravity|tipload|iterations|scan\n");
         return 2;
     }
     return 0;
