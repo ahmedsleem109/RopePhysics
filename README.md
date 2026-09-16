@@ -12,15 +12,14 @@ Long-form writeup: [`docs/writeup.md`](docs/writeup.md).
 
 | phase | state |
 |---|---|
-| 1 — CPU reference + validation | **done.** Every case passes; convergence is second order where the discretization allows it |
+| 1 — CPU reference + validation | **done.** Every physics case passes; convergence is second order where the discretization allows it. Static cases are solved directly and run in about a second |
 | 2 — contact, friction, self-collision | **done.** Capstan equation reproduced within 1.6% across four wrap angles |
-| 3 — CUDA port | **built, not run.** Kernels compile and the coloring is verified, but this machine's driver (576.52, CUDA ≤ 12.9) cannot run the only installed CUDA compiler's runtime (13.1). Parity, determinism and GPU throughput cases are written and report the diagnostic instead of passing |
-| 4 — scale and characterization | **done on CPU.** Stability envelope, failure study and batched throughput measured; GPU numbers blocked as above |
+| 3 — CUDA port | **running.** On an RTX 3060 Laptop GPU (driver 616.92) both strategies match the colour-ordered CPU to float rounding, agree with each other bit for bit, and are bitwise deterministic across runs. Nsight profiling and GPU contacts are still open |
+| 4 — scale and characterization | **reopened.** Batched CPU throughput measured. The stability envelope and failure study were invalidated by the stretch-constraint frame fix and fail until redesigned; GPU numbers blocked as above |
 | 5 — demo, writeup | **done.** 60 s video rendered offline from CPU simulations with honest timing captions; writeup in `docs/` |
 
-The GPU gap is the one thing standing between this and the plan as written. The
-fix is a driver update to r580+ followed by `build\rodsim.exe gpu-parity
-gpu-determinism gpu-throughput` — the cases are already there.
+Still open against the plan: Nsight profiling, contacts and self-collision on
+the GPU, the redesigned stability study, and a re-render of the demo video.
 
 ---
 
@@ -28,22 +27,30 @@ gpu-determinism gpu-throughput` — the cases are already there.
 
 | claim | measured |
 |---|---|
-| cantilever tip deflection, mesh convergence | slope **2.23**, finest mesh **0.012%** off Euler–Bernoulli |
-| pure end moment, circular arc | slope **2.02** |
-| large-deflection elastica, tip position | worst **9.7e-4 L** over `PL²/EI` in [0.5, 5] |
+| cantilever tip deflection, mesh convergence | slope **2.00** to n = 256, **7.6e-6** off Timoshenko; identical on an oblique axis to 2e-12 |
+| pure end moment, circular arc | slope **2.01** to n = 128, radius **1.0e-4** off |
+| large-deflection elastica, tip position | worst **6.3e-4 L** over `PL²/EI` in [0.5, 5] |
 | helix from intrinsic `(κ, τ)` | radius **2.2e-10**, pitch **5.2e-4** relative |
 | Michell twist-buckling threshold | **2.3%** at the finest mesh, converging (slope 0.82) |
-| rest height on plane / sphere / capsule / box | worst **5.1e-13** relative |
-| slip angle on an incline | within **2.0%** of `atan μ`; sliding friction coefficient within **2.2%** |
+| rest height on plane / sphere / capsule / box | worst **2.2e-16** relative |
+| slip angle on an incline | within **1.5%** of `atan μ`; sliding friction coefficient within **1.7%** |
 | capstan `T₂/T₁ = e^{μθ}`, 0.25 to 1 turn | worst **1.6%**, 0.3% at one full turn |
-| rope coiling into a pile | up to 13 simultaneous self-contacts, worst overlap **0.056%** of diameter |
+| rope coiling into a pile | up to 13 simultaneous self-contacts, worst overlap **0.18%** of diameter |
 | constraint coloring | **2 colours** per constraint family at every resolution, verified conflict-free |
-| C++ vs independent NumPy implementation | **4.8e-13 m** after 200 steps |
-| stability vs stiffness | stable dt per sweep varies **1.39×** across four decades of Young's modulus |
-| what breaks it | motion of **0.66 element lengths per sweep**, 1.11× spread across meshes |
-| batched CPU throughput | **23–24 M** segment-substeps/s, 16 threads (11.6× over one thread) |
+| C++ vs independent NumPy implementation | **4.7e-13 m** after 200 steps |
+| batched CPU throughput | **23–25 M** segment-substeps/s, 16 threads (11.6× over one thread) |
+| **GPU throughput, laptop RTX 3060** | **1.17 B** segment-substeps/s (16 384 rods × 64 segments × 8 substeps, fused); **1.86 B** at 2048 × 256 segments; **47×** the 16-thread CPU on the same workload |
+| GPU vs CPU parity | **2e-8 m** after one step, growing exactly as a float-vs-double CPU build does (2.5e-4 m at 200 steps); multi-kernel and fused **bitwise identical** |
 
 Full data in `docs/data/*.csv`, figures in `docs/figs/`.
+
+> **Stability claims withdrawn (2026-09-16).** The stability-envelope and
+> failure-study results below were measured with a stretch/shear constraint that
+> applied its compliance in world instead of material axes. After the fix, stable
+> timesteps rose 5–20× and blow-up is no longer monotone in `dt`; both old and new
+> runs near the limit carry constraint strains of 50–250%, so an energy-bounded
+> criterion was never measuring usable accuracy. Those two cases currently fail
+> and are being redesigned. See `REMAINING.md`.
 
 ---
 
@@ -55,7 +62,7 @@ Full data in `docs/data/*.csv`, figures in `docs/figs/`.
 | segments | `N-1` | material frame `q_j` (unit quaternion), body-frame inertia |
 
 ```
-stretch / shear   C_s = (x_{i+1} - x_i) / l  -  R(q_j) e3
+stretch / shear   C_s = R(q_j)^T (x_{i+1} - x_i) / l  -  e3      (material frame)
 bend / twist      C_b = (2 / lbar) Im(conj(q_a) q_b)  -  Omega_rest
 
 alpha_s = diag( 1/(ks G A), 1/(ks G A), 1/(E A) ) / l
@@ -85,6 +92,7 @@ in [`docs/writeup.md`](docs/writeup.md).
 src/core/math3.h            vec3/mat3/quat, templated: double on the host, float on the device
 src/core/rod.{h,cpp}        SoA state, material, constraints, builders, ghost-frame clamps
 src/core/solver.{h,cpp}     XPBD substepping, projections, contacts, static relaxation
+src/core/statics.{h,cpp}    direct static equilibrium: banded Newton with load continuation
 src/core/collision.{h,cpp}  primitives, contacts, spatial hash, self-collision
 src/core/coloring.{h,cpp}   greedy constraint graph coloring, with a verifier
 src/gpu/gpu_solver.cu       CUDA kernels: multi-kernel and fused shared-memory strategies
@@ -96,6 +104,7 @@ tools/experiments/          exploratory probes (stability_probe -> rodexp)
 tools/plot_validation.py    CSV -> figures, light (writeup) or dark (video)
 tools/render_scene.py       offline renderer for scene trajectories
 tools/make_video.py         assembles the demo video
+.github/workflows/          CI: builds and runs the validation suite on every push
 ```
 
 ---
@@ -118,9 +127,11 @@ python tools\reference_prototype.py     # cross-check against the NumPy mirror
 build\rodexp.exe gravity                # exploratory stability probe
 ```
 
-The full suite takes a long time (tens of minutes). Nearly all of it is the
-quadratic Gauss–Seidel budget the static cases need to be genuinely converged —
-see the writeup — plus the capstan and twist-buckling sweeps.
+The full suite takes about 17 minutes, almost all of it twist buckling (9 min,
+honest dynamics at 256 substeps) and the capstan sweep (3 min). The static
+cases are solved directly (`src/core/statics.cpp`) and take about a second
+together; under the old XPBD relaxation they took over 11 minutes.
+`.github/workflows/validation.yml` runs the suite on every push.
 
 ---
 
@@ -145,10 +156,12 @@ to produce a plausible-looking wrong answer. The writeup has the detail.
 5. **Self-collision must exclude pairs by rest length, not index.** With
    segments shorter than the diameter, segments two apart are closer than `2r`
    at rest; the solver pushed apart a rope that was not touching itself.
-6. **What limits the timestep is motion, not stiffness.** The first theory in
-   this repository (predictor displacement `h²a/l`) was inferred, not measured,
-   and was wrong. The measured limit is ~0.66 element lengths of motion per
-   Gauss–Seidel sweep; iterations tolerate ~2.8× more than substeps.
+6. **A constraint's compliance must live in the frame it is written in.** The
+   stretch/shear constraint measured strain in world axes, so a rod along `x`
+   carried `EA` in shear. Every case passed. Refining the cantilever to
+   n = 256, affordable only once statics were solved directly, showed it
+   converging to a third of the Timoshenko shear deflection. The same fix
+   invalidated this repository's stability findings (see the note above).
 7. **Several tests passed without testing anything,** and were rewritten: a
    stability sweep whose bisection never left its upper bound, a self-collision
    test with zero contacts, and a capstan fit dragged by creeping points. Each

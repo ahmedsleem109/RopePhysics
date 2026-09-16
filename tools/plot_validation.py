@@ -116,6 +116,9 @@ def plot_solver(data, figs):
         ys = [t for t, s in zip(d["tip_deflection"], d["substeps"]) if s == sub]
         ax.semilogx(xs, ys, "o-", color=T["series"][i], linewidth=2, markersize=6,
                     label=f"{int(sub)} substep{'s' if sub != 1 else ''}")
+    if "direct_tip" in d:
+        ax.axhline(d["direct_tip"][0], color=T["guide"], linewidth=1.5, linestyle="--",
+                   label="direct static solve")
     style(ax, "Static equilibrium vs solver budget (n = 32)",
           "Gauss-Seidel sweeps per substep", "tip deflection [m]")
     legend(ax)
@@ -323,6 +326,48 @@ def plot_throughput(data, figs):
     save(fig, figs, "throughput_cpu.png")
 
 
+def plot_throughput_gpu(data, figs):
+    # CPU vs GPU on the same workload: 64-segment rods, 8 substeps, one sweep,
+    # batch size swept. CPU at its full thread count, median of repeats.
+    g = read(os.path.join(data, "gpu_throughput.csv"))
+    fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
+    series = [("fused", "GPU fused (1 launch/step)", 0), ("multikernel", "GPU multi-kernel", 1)]
+    for strat, label, k in series:
+        pts = sorted((r, v / 1e6) for s, r, n, sub, v in
+                     zip(g["strategy"], g["rods"], g["segments"], g["substeps"],
+                         g["segment_steps_per_sec"])
+                     if s == strat and n == 64 and sub == 8 and r != 2048)
+        ax0.loglog(*zip(*pts), "o-", color=T["series"][k], linewidth=2, markersize=6, base=2,
+                   label=label)
+    cpu_path = os.path.join(data, "throughput_cpu.csv")
+    if os.path.exists(cpu_path):
+        c = read(cpu_path)
+        top = max(c["threads"])
+        by_rods = {}
+        for t, r, n, sub, v in zip(c["threads"], c["rods"], c["segments"], c["substeps"],
+                                   c["segment_steps_per_sec"]):
+            if t == top and n == 64 and sub == 8:
+                by_rods.setdefault(r, []).append(v / 1e6)
+        xs = sorted(by_rods)
+        ax0.loglog(xs, [float(np.median(by_rods[x])) for x in xs], "s-", color=T["series"][2],
+                   linewidth=2, markersize=5, base=2, label=f"CPU, {int(top)} threads")
+    ax0.set_yscale("log", base=10)
+    style(ax0, "Throughput vs batch size (64 segments, 8 substeps)", "rods in batch",
+          "M segment-substeps / s")
+    legend(ax0)
+
+    for strat, label, k in series:
+        pts = sorted((n, v / 1e6) for s, r, n, sub, v in
+                     zip(g["strategy"], g["rods"], g["segments"], g["substeps"],
+                         g["segment_steps_per_sec"])
+                     if s == strat and r == 2048 and sub == 8)
+        ax1.semilogx(*zip(*pts), "o-", color=T["series"][k], linewidth=2, markersize=6, base=2,
+                     label=label)
+    ax1.set_ylim(bottom=0)
+    style(ax1, "GPU vs rod length (2048 rods)", "segments per rod", "M segment-substeps / s")
+    save(fig, figs, "throughput_gpu.png")
+
+
 def annotate_heatmap(ax, grid):
     """Write each cell's value, with ink that flips on cell lightness so every
     value stays readable against the sequential ramp in either theme."""
@@ -401,6 +446,7 @@ PLOTS = {
     "incline.csv": plot_incline,
     "self_collision.csv": plot_self_collision,
     "throughput_cpu.csv": plot_throughput,
+    "gpu_throughput.csv": plot_throughput_gpu,
     "stability_envelope.csv": plot_stability,
     "failure_study.csv": plot_failure,
 }
