@@ -61,7 +61,8 @@ int HarnessTask::steps() const {
 
 HarnessTask::Policy HarnessTask::handWrittenPolicy() const {
     // Straight at the targets: under peg A, over peg B, through the clip.
-    return {Vec3(pegA.x, Real(-0.08), 0), Vec3(Real(0.40), 0, 0), Vec3(pegB.x, Real(0.08), 0),
+    return {Vec3(pegA.x, pegA.y - Real(0.08), 0), Vec3(Real(0.40), 0, 0),
+            Vec3(pegB.x, pegB.y + Real(0.08), 0),
             Vec3(clip.x - Real(0.10), 0, 0), Vec3(clip.x + Real(0.18), 0, 0)};
 }
 
@@ -83,20 +84,11 @@ Vec3 HarnessTask::gripperAt(const Policy& policy, Real t) const {
     return Vec3(from.x, from.y, material().radius);
 }
 
-Vec3 HarnessTask::gripperVelocity(const Policy& policy, Real t) const {
-    const Real dt = params().dt;
-    return (gripperAt(policy, t + dt) - gripperAt(policy, t)) / dt;
-}
-
-std::vector<Real> HarnessTask::legStarts() const {
-    std::vector<Real> starts;
-    Real t = 0;
-    for (Real s : legSeconds) {
-        starts.push_back(t);
-        t += s;
-    }
-    starts.push_back(t);
-    return starts;
+Vec3 HarnessTask::gripperVelocity(const Policy& policy, int step) const {
+    const double period = double(params().dt) * stepsPerControl;
+    const int tick = step / stepsPerControl;
+    return (gripperAt(policy, Real((tick + 1) * period)) - gripperAt(policy, Real(tick * period))) /
+           Real(period);
 }
 
 HarnessTask::Outcome HarnessTask::evaluate(const std::vector<Vec3>& cable) const {
@@ -107,7 +99,8 @@ HarnessTask::Outcome HarnessTask::evaluate(const std::vector<Vec3>& cable) const
     // taking the crossing closest to the peg, if one comes within reach. (The
     // cable point nearest the peg is not enough: after wrapping under a peg the
     // nearest point can be on the stretch already climbing towards the next.)
-    auto sideOf = [&](const Vec3& peg, Real reach) {
+    // Returns the signed offset of that crossing, 0 if the cable never crosses.
+    auto sideOf = [&](const Vec3& peg) {
         Real best = 1e9;
         Real side = 0;
         for (std::size_t i = 0; i + 1 < cable.size(); ++i) {
@@ -120,15 +113,16 @@ HarnessTask::Outcome HarnessTask::evaluate(const std::vector<Vec3>& cable) const
                 side = y - peg.y;
             }
         }
-        return best <= reach ? side : Real(0);
+        return side;
     };
     // Laid against the peg: a route that passes the right side of a peg with a
     // slack loop is not a routed harness.
-    const Real reach = pegRadius + r + Real(0.015);
-    const Real a = sideOf(pegA, reach);
-    const Real b = sideOf(pegB, reach);
-    out.belowA = a < 0;
-    out.aboveB = b > 0;
+    const Real touching = pegRadius + r;
+    const Real slack = Real(0.015);
+    const Real a = sideOf(pegA);
+    const Real b = sideOf(pegB);
+    out.belowA = a < 0 && -a <= touching + slack;
+    out.aboveB = b > 0 && b <= touching + slack;
 
     // Through the clip: some segment crosses the clip's x between its posts,
     // down on the board.
@@ -141,15 +135,21 @@ HarnessTask::Outcome HarnessTask::evaluate(const std::vector<Vec3>& cable) const
         if (c.z > clipHeight) continue;
         clipMiss = std::min(clipMiss, std::abs(c.y - clip.y));
     }
-    const Real inner = clipHalfGap - clipPostRadius - r;
-    out.throughClip = clipMiss < inner;
+    // Between the post centres. (Resting against a post from inside it sits at
+    // clipHalfGap - clipPostRadius - r, less when pulled hard into the post;
+    // from outside it could not be closer than clipHalfGap + clipPostRadius.)
+    out.throughClip = clipMiss < clipHalfGap;
     out.sideA = a;
     out.sideB = b;
     out.clipMiss = clipMiss;
 
     auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v)); };
-    out.score = clamp01(-a / 0.03) + clamp01(b / 0.03) +
-                (out.throughClip ? 1.0 : clamp01(1.0 - (clipMiss - inner) / 0.1));
+    auto pegScore = [&](double offset) {  // offset > 0: on the correct side
+        if (offset <= 0) return 0.0;
+        return 1.0 - 0.5 * clamp01((offset - double(touching + slack)) / 0.1);
+    };
+    out.score = pegScore(-a) + pegScore(b) +
+                (out.throughClip ? 1.0 : clamp01(1.0 - (clipMiss - clipHalfGap) / 0.1));
     return out;
 }
 

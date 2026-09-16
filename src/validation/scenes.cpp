@@ -464,7 +464,7 @@ int sceneHarness(const std::string& outDir) {
         const auto t0 = Clock::now();
         for (int s = 0; s < stepsPerFrame; ++s, ++stepIndex) {
             rod.state.kinematicVelocity.back() =
-                task.gripperVelocity(policy, Real(stepIndex) * p.dt);
+                task.gripperVelocity(policy, stepIndex);
             step(rod, p, world, ctx);
         }
         const double wall = std::chrono::duration<double>(Clock::now() - t0).count();

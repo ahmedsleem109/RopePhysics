@@ -27,10 +27,12 @@ namespace crs {
 namespace apps {
 
 struct HarnessTask {
-    // Board layout, metres; the board surface is z = 0.
+    // Board layout, metres; the board surface is z = 0. The pegs sit off the
+    // straight line from connector to clip (A below it, B above), so the
+    // routed cable makes a visible S around them.
     Vec3 connector = Vec3(0, 0, 0);
-    Vec3 pegA = Vec3(Real(0.25), 0, 0);
-    Vec3 pegB = Vec3(Real(0.55), 0, 0);
+    Vec3 pegA = Vec3(Real(0.25), Real(-0.06), 0);
+    Vec3 pegB = Vec3(Real(0.55), Real(0.06), 0);
     Vec3 clip = Vec3(Real(0.85), 0, 0);
     Real pegRadius = Real(0.012);
     Real pegHeight = Real(0.06);
@@ -66,19 +68,22 @@ struct HarnessTask {
     // A reasonable first guess a person would program.
     Policy handWrittenPolicy() const;
 
-    // Gripper position at time t, and the velocity to apply over [t, t + dt).
+    // Gripper position at time t (smooth within each leg).
     Vec3 gripperAt(const Policy& policy, Real t) const;
-    Vec3 gripperVelocity(const Policy& policy, Real t) const;
-    // The times at which the gripper velocity changes (start of each leg and
-    // of the hold): the only moments a batch must upload new velocities.
-    std::vector<Real> legStarts() const;
+    // The robot controller updates the gripper velocity every stepsPerControl
+    // steps, moving at constant velocity from one point on gripperAt to the
+    // next. The velocity to apply during a given step; it changes only when
+    // step % stepsPerControl == 0, the only moments a batch must upload.
+    int stepsPerControl = 10;
+    Vec3 gripperVelocity(const Policy& policy, int step) const;
 
     // How well a cable shape fulfils the routing.
     struct Outcome {
         bool belowA = false, aboveB = false, throughClip = false;
-        // Smooth score for learning: each requirement contributes up to 1 by
-        // how far the cable sits on the correct side (capped), so a near miss
-        // scores better than a wild one.
+        // Smooth score for learning, 3 on success: each peg contributes 1 when
+        // the cable is laid against its correct side, fading to 0.5 as it
+        // passes that side further away, 0 on the wrong side; the clip 1 when
+        // threaded, fading with the miss distance. A near miss beats a wild one.
         double score = 0;
         double sideA = 0, sideB = 0, clipMiss = 0;  // diagnostics, metres
         bool success() const { return belowA && aboveB && throughClip; }
