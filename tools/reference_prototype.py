@@ -197,7 +197,7 @@ class Rod:
 def project(rod: Rod, h: float):
     a_scale = 1.0 / (h * h)
 
-    # stretch / shear: C = (x1 - x0)/l - R e3
+    # stretch / shear, in the material frame: C = R^T (x1 - x0)/l - e3
     for k in range(len(rod.s_seg)):
         i0, i1, j = rod.s_p0[k], rod.s_p1[k], rod.s_seg[k]
         w0, w1 = rod.inv_mass[i0], rod.inv_mass[i1]
@@ -207,18 +207,18 @@ def project(rod: Rod, h: float):
         l = rod.s_l[k]
         q = rod.q[j]
         R = qmat(q)
-        C = (rod.x[i1] - rod.x[i0]) / l - R[:, 2]
+        u = R.T @ (rod.x[i1] - rod.x[i0]) / l
+        C = u - E3
         alpha = rod.s_alpha[k] * a_scale
         A = (w0 + w1) / l ** 2 * np.eye(3)
-        A += R @ np.diag([iI[1], iI[0], 0.0]) @ R.T
+        A += skew(u) @ np.diag(iI) @ skew(u).T
         A += np.diag(alpha)
         dl = np.linalg.solve(A, -(C + alpha * rod.s_lam[k]))
         rod.s_lam[k] += dl
-        rod.x[i0] -= w0 / l * dl
-        rod.x[i1] += w1 / l * dl
+        rod.x[i0] -= w0 / l * (R @ dl)
+        rod.x[i1] += w1 / l * (R @ dl)
         if iI.any():
-            body = qrot(qconj(q), dl)
-            rod.q[j] = qapply_body_delta(q, iI * (-np.cross(E3, body)))
+            rod.q[j] = qapply_body_delta(q, iI * np.cross(dl, u))
 
     # bend / twist: C = 2 Im(conj(qa) qb)/lbar - Omega0
     for k in range(len(rod.b_a)):

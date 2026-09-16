@@ -48,11 +48,12 @@ __device__ void projectStretchOne(const DevRodF& d, const View& view, int k, flo
 
     const float l = d.sRest[k];
     const Quatf q = view.q[view.S(j)];
-    const Mat3f R = toMat3(q);
-    const Vec3f C = (view.x[view.P(i1)] - view.x[view.P(i0)]) / l - R.col(2);
+    // Material-frame C, as in solver.cpp (see the note there).
+    const Vec3f u = rotateInv(q, view.x[view.P(i1)] - view.x[view.P(i0)]) / l;
+    const Vec3f C = u - Vec3f(0, 0, 1);
 
     const Vec3f alpha = d.sCompliance[k] * invH2;
-    Mat3f A = Mat3f::identity((w0 + w1) / (l * l)) + sandwichDiag(R, Vec3f(iI.y, iI.x, 0.0f));
+    Mat3f A = Mat3f::identity((w0 + w1) / (l * l)) + sandwichDiag(Mat3f::skew(u), iI);
     A.m[0][0] += alpha.x;
     A.m[1][1] += alpha.y;
     A.m[2][2] += alpha.z;
@@ -62,12 +63,10 @@ __device__ void projectStretchOne(const DevRodF& d, const View& view, int k, flo
     if (!solveSPD3(A, -(C + cwise(alpha, view.lamS[li])), dLambda)) return;
     view.lamS[li] += dLambda;
 
-    view.x[view.P(i0)] -= dLambda * (w0 / l);
-    view.x[view.P(i1)] += dLambda * (w1 / l);
-    if (norm2(iI) > 0.0f) {
-        const Vec3f body = rotateInv(q, dLambda);
-        view.q[view.S(j)] = applyBodyDelta(q, cwise(iI, -cross(Vec3f(0, 0, 1), body)));
-    }
+    const Vec3f world = rotate(q, dLambda);
+    view.x[view.P(i0)] -= world * (w0 / l);
+    view.x[view.P(i1)] += world * (w1 / l);
+    if (norm2(iI) > 0.0f) view.q[view.S(j)] = applyBodyDelta(q, cwise(iI, cross(dLambda, u)));
 }
 
 __device__ void projectBendOne(const DevRodF& d, const View& view, int k, float invH2) {
