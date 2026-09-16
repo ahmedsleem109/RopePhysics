@@ -68,6 +68,7 @@ CaseResult runThroughput(const std::string& outDir);        // batched CPU segme
 
 // Applications: a real task swept on the GPU, checked against theory and the CPU.
 CaseResult runCableHanging(const std::string& outDir);  // will a cable stay on a hook?
+CaseResult runHarnessLearning(const std::string& outDir);  // a robot learns to route a harness
 
 // Dumps a short, fully deterministic trajectory for tools/reference_prototype.py
 // to reproduce. Cross-implementation agreement on the solver map is a stronger

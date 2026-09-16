@@ -42,6 +42,7 @@ const Entry kCases[] = {
     {"timestep-envelope", crs::runTimestepEnvelope},
     {"throughput", crs::runThroughput},
     {"cable-hanging", crs::runCableHanging},
+    {"harness-learning", crs::runHarnessLearning},
     {"crosscheck", crs::runCrossCheck},
 };
 
