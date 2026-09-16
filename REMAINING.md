@@ -65,12 +65,11 @@ compile; they have never executed.
       was applied in world axes. Fixed on CPU, GPU kernel and NumPy mirror;
       oblique-axis regression check added. GPU kernel change is compiled but,
       like the rest, never run.
-- [ ] **Redesign the stability study (now failing).** The frame fix invalidated
-      `stability-envelope` and `failure-study`: stable dt rose 5–20× and
-      boundedness is non-monotone in dt (`rodexp scan`). Old and new runs near
-      the limit carry 50–250% constraint strain, so an energy bound was never
-      the right criterion. Define usable dt by constraint error, rerun, rewrite
-      writeup §6 and the README.
+- [x] **Stability study redesigned** as `timestep-envelope`: largest substep
+      keeping worst strain under 1% (monotone in dt, unlike the old energy
+      bound). Limit at 1.1–3.1% of an element moved per substep across
+      E = 1e7..1e9 and 16–64 segments. Replaces stability-envelope and
+      failure-study.
 - [ ] Re-run demo scenes and re-render the video (simulated before the fix).
 - [~] CI: `.github/workflows/validation.yml` written (CPU, Ubuntu); the code
       builds warning-clean under g++ 13. Not yet run, as there is no remote. It

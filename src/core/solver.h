@@ -53,13 +53,10 @@ struct SolverContext {
 // maxAngle = 0.1 the pure-moment case converges to a state carrying 0.77% excess
 // moment in every joint, and at 0.00625 that bias disappears.
 //
-// What this is not: the dynamic stability limit. That limit was measured
-// separately (the `stability-envelope` and `failure-study` cases) and it is
-// kinematic -- breakdown when material moves about two-thirds of an element per
-// Gauss-Seidel sweep -- independent of stiffness, and not governed by the
-// h^2 f / m group this function bounds. An earlier comment here claimed
-// otherwise; the probe that isolated the limit found that group varying fivefold
-// at the point of failure.
+// What this is not: the dynamic accuracy limit. That is measured separately
+// (the `timestep-envelope` case): keeping strain error under 1% requires
+// material to move no more than a few percent of an element length per substep,
+// which is a kinematic bound, not the h^2 f / m group this function bounds.
 int stableSubsteps(const Rod& rod, Vec3 gravity, Real dt, Real fraction = Real(0.05),
                    Real maxAngle = Real(0.1));
 

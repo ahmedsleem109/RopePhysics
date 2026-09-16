@@ -39,9 +39,8 @@ const Entry kCases[] = {
     {"gpu-parity", crs::runGpuParity},
     {"gpu-determinism", crs::runGpuDeterminism},
     {"gpu-throughput", crs::runGpuThroughput},
-    {"stability-envelope", crs::runStabilityEnvelope},
+    {"timestep-envelope", crs::runTimestepEnvelope},
     {"throughput", crs::runThroughput},
-    {"failure-study", crs::runFailureStudy},
     {"crosscheck", crs::runCrossCheck},
 };
 

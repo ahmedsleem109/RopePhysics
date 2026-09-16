@@ -138,8 +138,7 @@ def main():
         ("cantilever_convergence.png", "Second-order convergence against Euler-Bernoulli"),
         ("capstan.png", "Capstan equation T2/T1 = exp(mu theta), reproduced across wrap angles"),
         ("twist_buckling.png", "Michell twist-buckling threshold, converging under refinement"),
-        ("stability_envelope.png", "Stable timestep: flat in stiffness, set by sweeps per step"),
-        ("failure_study.png", "Breakdown at ~2/3 of an element of motion per sweep"),
+        ("timestep_envelope.png", "Accurate substep: a few percent of an element of motion"),
     ]
     for name, caption in slides:
         path = os.path.join(args.figs, name)

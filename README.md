@@ -66,6 +66,7 @@ segments are halved in length, as the theory says it should.
 | Block on a slope | slips at `tan α = μ` | within **1.5%** |
 | Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn |
 | Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
+| Timestep accuracy (swinging cantilever) | strain error under 1% | limit at **1–3%** of a segment moved per substep |
 | Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
 | GPU vs CPU | same trajectory | **2e-8 m** after one step; drift matches float rounding |
 
@@ -232,8 +233,9 @@ continuous integration.
 
 **Open** (tracked in [`REMAINING.md`](REMAINING.md)):
 
-- **Timestep stability study is being redesigned.** The old study was
-  invalidated by the stiffness-frame fix, and its two tests currently fail.
+- **The timestep guidance is one scenario deep.** To keep strain error under
+  1%, material should move no more than about 1–3% of a segment length per
+  substep. That was measured on a swinging cantilever only.
 - **The GPU runs gravity-loaded rods only.** Contacts, friction,
   self-collision and applied loads are CPU-only for now. There is no profiler
   study yet.
