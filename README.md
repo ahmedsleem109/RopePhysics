@@ -1,65 +1,154 @@
-# GPU Cosserat Rod Simulator
+# RopePhysics — a validated rope and cable simulator for CPU and GPU
 
-A validated discrete Cosserat rod solver (XPBD, quaternion material frames) with
-contact, Coulomb friction and self-collision, a CUDA port designed for batched
-environments, and a validation suite that checks every claim against an
-independent reference.
+[![validation](https://github.com/ahmedsleem109/RopePhysics/actions/workflows/validation.yml/badge.svg)](https://github.com/ahmedsleem109/RopePhysics/actions/workflows/validation.yml)
 
-Plan and phase gates: [`gpu-cosserat-rod-simulator-plan.md`](gpu-cosserat-rod-simulator-plan.md).
-Long-form writeup: [`docs/writeup.md`](docs/writeup.md).
+RopePhysics simulates **ropes, cables and other thin elastic rods**: they bend,
+twist, stretch, hang, drape over objects, slide with friction and pile up on
+themselves. It runs on the CPU and, batched across thousands of independent
+rods, on an NVIDIA GPU.
 
-## Status
+What makes it different from a typical game-physics rope is that **every result
+is checked against textbook physics**. There is a validation suite that compares
+the simulator against exact solutions (beam bending, buckling, friction laws) and
+fails if it drifts.
 
-| phase | state |
-|---|---|
-| 1 — CPU reference + validation | **done.** Every physics case passes; convergence is second order where the discretization allows it. Static cases are solved directly and run in about a second |
-| 2 — contact, friction, self-collision | **done.** Capstan equation reproduced within 1.6% across four wrap angles |
-| 3 — CUDA port | **running.** On an RTX 3060 Laptop GPU (driver 616.92) both strategies match the colour-ordered CPU to float rounding, agree with each other bit for bit, and are bitwise deterministic across runs. Nsight profiling and GPU contacts are still open |
-| 4 — scale and characterization | **reopened.** Batched CPU throughput measured. The stability envelope and failure study were invalidated by the stretch-constraint frame fix and fail until redesigned; GPU numbers blocked as above |
-| 5 — demo, writeup | **done.** 60 s video rendered offline from CPU simulations with honest timing captions; writeup in `docs/` |
+<table>
+<tr>
+<td width="50%"><img src="docs/media/drape.gif" alt="A cable dropped over a post drapes, slides and piles onto the floor"></td>
+<td width="50%"><img src="docs/media/grid.gif" alt="A field of 256 independent rods swaying"></td>
+</tr>
+<tr>
+<td><b>Cable over a post.</b> 120 segments with friction, floor contact and
+self-collision. Simulated 3.3× faster than real time on one CPU thread.</td>
+<td><b>256 rods at once.</b> Each rod is an independent simulation, the
+workload a robot-learning batch looks like. 16 CPU threads here; the GPU runs
+thousands (see <a href="#how-fast-is-it">How fast</a>).</td>
+</tr>
+</table>
 
-Still open against the plan: Nsight profiling, contacts and self-collision on
-the GPU, the redesigned stability study, and a re-render of the demo video.
-
----
-
-## Headline results
-
-| claim | measured |
-|---|---|
-| cantilever tip deflection, mesh convergence | slope **2.00** to n = 256, **7.6e-6** off Timoshenko; identical on an oblique axis to 2e-12 |
-| pure end moment, circular arc | slope **2.01** to n = 128, radius **1.0e-4** off |
-| large-deflection elastica, tip position | worst **6.3e-4 L** over `PL²/EI` in [0.5, 5] |
-| helix from intrinsic `(κ, τ)` | radius **2.2e-10**, pitch **5.2e-4** relative |
-| Michell twist-buckling threshold | **2.3%** at the finest mesh, converging (slope 0.82) |
-| rest height on plane / sphere / capsule / box | worst **2.2e-16** relative |
-| slip angle on an incline | within **1.5%** of `atan μ`; sliding friction coefficient within **1.7%** |
-| capstan `T₂/T₁ = e^{μθ}`, 0.25 to 1 turn | worst **1.6%**, 0.3% at one full turn |
-| rope coiling into a pile | up to 13 simultaneous self-contacts, worst overlap **0.18%** of diameter |
-| constraint coloring | **2 colours** per constraint family at every resolution, verified conflict-free |
-| C++ vs independent NumPy implementation | **4.7e-13 m** after 200 steps |
-| batched CPU throughput | **23–25 M** segment-substeps/s, 16 threads (11.6× over one thread) |
-| **GPU throughput, laptop RTX 3060** | **1.17 B** segment-substeps/s (16 384 rods × 64 segments × 8 substeps, fused); **1.86 B** at 2048 × 256 segments; **47×** the 16-thread CPU on the same workload |
-| GPU vs CPU parity | **2e-8 m** after one step, growing exactly as a float-vs-double CPU build does (2.5e-4 m at 200 steps); multi-kernel and fused **bitwise identical** |
-
-Full data in `docs/data/*.csv`, figures in `docs/figs/`.
-
-> **Stability claims withdrawn (2026-09-16).** The stability-envelope and
-> failure-study results below were measured with a stretch/shear constraint that
-> applied its compliance in world instead of material axes. After the fix, stable
-> timesteps rose 5–20× and blow-up is no longer monotone in `dt`; both old and new
-> runs near the limit carry constraint strains of 50–250%, so an energy-bounded
-> criterion was never measuring usable accuracy. Those two cases currently fail
-> and are being redesigned. See `REMAINING.md`.
+Both clips are played back in real time and rendered offline from the
+simulator's output (`rodsim scene drape|grid`, then
+`tools/make_readme_media.py`).
 
 ---
 
-## The model
+## What it can do
 
-| | count | state |
+- **Bend, twist, stretch and shear** with real material constants (Young's
+  modulus, Poisson ratio, density, radius). Stiffness does not change when you
+  change the timestep or the number of segments.
+- **Contact** with planes, spheres, capsules and boxes, with **Coulomb friction**
+  (sticking and sliding).
+- **Self-collision**, so a rope can coil into a pile without passing through
+  itself.
+- **Clamped, pinned and twisted ends**, and applied forces and torques.
+- **Batched GPU simulation**: thousands of rods stepped in parallel, with results
+  that match the CPU and are bit-for-bit repeatable.
+- **Direct static solver**: finds the resting shape of a loaded rod in
+  milliseconds, used to check accuracy.
+
+---
+
+## How accurate is it?
+
+Each row is a separate automated check in `rodsim all`, compared against an
+independent reference. "Slope 2" means the error shrinks 4× every time the
+segments are halved in length, as the theory says it should.
+
+| test | compared against | result |
 |---|---|---|
-| particles | `N` | centerline position `x_i`, lumped mass |
-| segments | `N-1` | material frame `q_j` (unit quaternion), body-frame inertia |
+| Cantilever bending under a tip load | Timoshenko beam theory | error **7.6e-6** at 256 segments, slope **2.00**; same on any axis |
+| Rod bent into a circle by an end moment | exact circle, radius `EI/M` | error **1e-4** at 128 segments, slope **2.01** |
+| Large bending under a tip load | exact elastica | tip within **0.06%** of rod length |
+| Rod with built-in curvature and twist | exact helix | radius to **2e-10**, pitch to **5e-4** |
+| Twisted rod buckling | Michell/Greenhill threshold | **2.3%** at 32 segments, converging |
+| Resting on plane, sphere, capsule, box | exact geometry | **2e-16** |
+| Block on a slope | slips at `tan α = μ` | within **1.5%** |
+| Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn |
+| Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
+| Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
+| GPU vs CPU | same trajectory | **2e-8 m** after one step; drift matches float rounding |
+
+<table>
+<tr>
+<td width="50%"><img src="docs/figs/cantilever_convergence.png" alt="Cantilever error vs segment length"></td>
+<td width="50%"><img src="docs/figs/capstan.png" alt="Capstan tension ratio vs wrap angle"></td>
+</tr>
+<tr>
+<td>Cantilever error falls at second order as segments shrink.</td>
+<td>Friction around a post follows the capstan equation.</td>
+</tr>
+</table>
+
+All data is in `docs/data/*.csv` and every figure in `docs/figs/`. The long-form
+[writeup](docs/writeup.md) explains each test and what it caught.
+
+---
+
+## How fast is it?
+
+Measured in **segment-substeps per second**: rods × segments × solver substeps
+completed per second. 64-segment rods, 8 substeps.
+
+| hardware | throughput |
+|---|---|
+| CPU, 16 threads | **25 M** /s |
+| Laptop GPU (RTX 3060), 16 384 rods | **1.17 B** /s — about **47×** the CPU |
+| Same GPU, 2 048 rods × 256 segments | **1.86 B** /s |
+
+<img src="docs/figs/throughput_gpu.png" alt="Throughput vs batch size and rod length, CPU and GPU">
+
+The GPU has two strategies. **Multi-kernel** launches one small kernel per
+constraint colour. **Fused** runs a whole timestep for a rod in one launch, in
+fast shared memory. Fused wins everywhere: 11× faster for a single rod, where
+launch overhead dominates, and 1.7× faster once the GPU is saturated. The
+writeup explains the curves.
+
+---
+
+## Quick start
+
+Requirements: Windows, CMake, Ninja, Visual Studio Build Tools (MSVC 14.44).
+CUDA 13.1 is optional; without it the CPU simulator and all CPU tests still
+build. The code also builds with g++ on Linux, which is what CI uses.
+
+```bat
+build.cmd                               :: configure + build into build\
+
+build\rodsim.exe all                    :: run every test (exit code = failed checks)
+build\rodsim.exe cantilever             :: run one test
+build\rodsim.exe scene drape            :: simulate a demo scene into out\scenes
+
+python tools\plot_validation.py         :: CSVs -> figures in docs\figs
+python tools\make_readme_media.py       :: scenes -> GIFs in docs\media
+python tools\make_video.py              :: scenes + figures -> out\video\demo.mp4
+python tools\reference_prototype.py     :: cross-check against the NumPy version
+```
+
+The full suite takes about 17 minutes; almost all of that is twist buckling and
+the capstan sweep. Python tools need `numpy`, `matplotlib`, `Pillow` and
+`imageio-ffmpeg`.
+
+---
+
+## How it works
+
+A rod is a chain of **particles** (positions) joined by **segments**, and each
+segment carries a **material frame** (a quaternion) that records how the
+cross-section is turned. Two constraints hold it together:
+
+- **stretch/shear** keeps each segment its rest length and aligned with its frame;
+- **bend/twist** penalizes how much one frame is rotated relative to the next.
+
+Each step moves everything under gravity and then projects the constraints
+(XPBD, Macklin et al. 2016/2019, with the Cosserat constraints of Kugelstadt &
+Schömer 2016). Constraint stiffness comes straight from the material, so results
+do not depend on timestep or resolution. On the GPU, constraints are split into
+two "colours" that don't share any state, so each colour can be solved fully in
+parallel.
+
+<details>
+<summary><b>The equations</b></summary>
 
 ```
 stretch / shear   C_s = R(q_j)^T (x_{i+1} - x_i) / l  -  e3      (material frame)
@@ -70,121 +159,87 @@ alpha_b = diag( 1/(E I),    1/(E I),    1/(G J) ) / lbar
 alpha~  = alpha / h^2          (h = substep)
 ```
 
-Both constraints are solved as 3×3 blocks. Jacobians are taken with respect to
-body-frame rotation increments, so body-frame inverse inertia is used directly.
-With this compliance scaling the static equilibrium contains neither `h` nor
-`l`: stiffness is the material's, independent of timestep and resolution.
+Both constraints are solved as 3×3 blocks, with Jacobians taken with respect to
+body-frame rotation increments. With this compliance scaling the static
+equilibrium contains neither `h` nor `l`.
 
-Contacts are one uniform constraint type (up to four particles with weights,
-one normal), unilateral, with position-level Coulomb friction whose cone bounds
-the *total* tangential correction per substep. Self-collision uses segment–
-segment closest points behind a uniform spatial hash built as key → counting
-sort → cell offsets, the same three steps a GPU broadphase runs.
+Contacts are one uniform constraint (up to four particles with weights, one
+normal), unilateral, with position-level Coulomb friction whose cone bounds the
+*total* tangential correction per substep. Self-collision uses segment–segment
+closest points behind a uniform spatial hash (key → counting sort → cell
+offsets, the same three steps a GPU broadphase runs).
 
-The derivation, the compliance argument and the coloring scheme are written up
-in [`docs/writeup.md`](docs/writeup.md).
-
----
-
-## Layout
-
-```
-src/core/math3.h            vec3/mat3/quat, templated: double on the host, float on the device
-src/core/rod.{h,cpp}        SoA state, material, constraints, builders, ghost-frame clamps
-src/core/solver.{h,cpp}     XPBD substepping, projections, contacts, static relaxation
-src/core/statics.{h,cpp}    direct static equilibrium: banded Newton with load continuation
-src/core/collision.{h,cpp}  primitives, contacts, spatial hash, self-collision
-src/core/coloring.{h,cpp}   greedy constraint graph coloring, with a verifier
-src/gpu/gpu_solver.cu       CUDA kernels: multi-kernel and fused shared-memory strategies
-src/gpu/gpu_batch.cpp       host orchestration: layout, upload/download, launch
-src/validation/             every validation and characterization case
-src/validation/scenes.cpp   demo scenes for the video
-tools/reference_prototype.py  independent NumPy implementation (cross-check)
-tools/experiments/          exploratory probes (stability_probe -> rodexp)
-tools/plot_validation.py    CSV -> figures, light (writeup) or dark (video)
-tools/render_scene.py       offline renderer for scene trajectories
-tools/make_video.py         assembles the demo video
-.github/workflows/          CI: builds and runs the validation suite on every push
-```
+The derivations are in [`docs/writeup.md`](docs/writeup.md).
+</details>
 
 ---
 
-## Build and run
-
-Windows, CMake + Ninja + MSVC. `build.cmd` pins the toolchain: MSVC 14.44
-(the newer 14.50 in the same install is rejected by nvcc) and CUDA 13.1 when
-present. Without nvcc, the CPU reference and its full suite still build.
+## Project layout
 
 ```
-build.cmd
-build\rodsim.exe all                    # every case; exit status = failed checks
-build\rodsim.exe capstan                # one case
-build\rodsim.exe scene drape            # demo scene -> out/scenes
-python tools\plot_validation.py         # docs/data -> docs/figs
-python tools\plot_validation.py --theme dark
-python tools\make_video.py              # out/scenes + figures -> out/video/demo.mp4
-python tools\reference_prototype.py     # cross-check against the NumPy mirror
-build\rodexp.exe gravity                # exploratory stability probe
+src/core/            the simulator (plain C++17, no dependencies)
+  math3.h              vectors, matrices, quaternions — double on CPU, float on GPU
+  rod.{h,cpp}          rod state, material, constraints, builders, clamped ends
+  solver.{h,cpp}       XPBD time stepping, constraint and contact projection
+  statics.{h,cpp}      direct static equilibrium (banded Newton)
+  collision.{h,cpp}    primitives, contact generation, spatial hash
+  coloring.{h,cpp}     constraint colouring for parallel solving
+src/gpu/             CUDA port
+  gpu_solver.cu        kernels: multi-kernel and fused strategies
+  gpu_batch.cpp        host side: memory layout, upload/download, launches
+src/validation/      every test case and the demo scenes
+src/main.cpp         the `rodsim` command-line driver
+tools/               plotting, rendering, video, NumPy cross-check, probes
+docs/                writeup, data (CSV), figures, README media
+.github/workflows/   CI: builds and runs the test suite on every push
 ```
-
-The full suite takes about 17 minutes, almost all of it twist buckling (9 min,
-honest dynamics at 256 substeps) and the capstan sweep (3 min). The static
-cases are solved directly (`src/core/statics.cpp`) and take about a second
-together; under the old XPBD relaxation they took over 11 minutes.
-`.github/workflows/validation.yml` runs the suite on every push.
 
 ---
 
-## What was hard, and what went wrong on the way
+## Lessons learned
 
-These are the findings a reviewer should care about, because each one is a way
-to produce a plausible-looking wrong answer. The writeup has the detail.
+<details>
+<summary><b>Seven ways this simulator produced plausible-looking wrong answers, and how each was caught</b></summary>
 
 1. **The clamp must sit where the continuum clamp sits.** Freezing the first
    segment's frame clamps at `s = l/2`, silently turning second-order
    convergence into first order. A ghost frame at `s = 0` fixes it.
-2. **Static equilibrium is `h`-independent only once the system is solved.**
-   An under-swept rod settles into a state that is genuinely too soft *and
-   reports itself converged*. Separately, a too-large substep leaves a
-   converged 0.77% bias that no number of sweeps removes.
-3. **Buckling is a question for dynamics.** A heavily-iterated XPBD step is
-   nearly backward Euler and damps genuinely unstable modes. An early version
-   reported a threshold 18% low that turned out to be numerical.
-4. **Friction's cap bounds the total, not each sweep's share.** Applying a fresh
-   Coulomb cap per sweep gives `iterations` times the friction; a block sat
-   motionless on a slope far steeper than `atan μ`.
-5. **Self-collision must exclude pairs by rest length, not index.** With
-   segments shorter than the diameter, segments two apart are closer than `2r`
-   at rest; the solver pushed apart a rope that was not touching itself.
-6. **A constraint's compliance must live in the frame it is written in.** The
-   stretch/shear constraint measured strain in world axes, so a rod along `x`
-   carried `EA` in shear. Every case passed. Refining the cantilever to
-   n = 256, affordable only once statics were solved directly, showed it
-   converging to a third of the Timoshenko shear deflection. The same fix
-   invalidated this repository's stability findings (see the note above).
-7. **Several tests passed without testing anything,** and were rewritten: a
-   stability sweep whose bisection never left its upper bound, a self-collision
-   test with zero contacts, and a capstan fit dragged by creeping points. Each
-   case now also asserts that the thing it measures actually happened.
+2. **Static equilibrium is timestep-independent only once the system is
+   solved.** An under-solved rod settles into a state that is too soft *and
+   reports itself converged*.
+3. **Buckling is a question for dynamics.** A heavily-iterated step damps
+   genuinely unstable modes; an early version reported a threshold 18% low.
+4. **Friction's cap bounds the total, not each iteration's share.** Otherwise a
+   block sits motionless on a slope far steeper than `atan μ`.
+5. **Self-collision must exclude neighbours by rest length, not index,** or a
+   finely-divided rope pushes itself apart when nothing is touching.
+6. **A stiffness must live in the frame it is defined in.** Stretch/shear strain
+   was measured in world axes, so a rod along `x` was 3× too stiff in shear.
+   Every test passed. Refining the cantilever to 256 segments exposed it.
+7. **Several tests passed without testing anything,** such as a self-collision
+   test with zero contacts. Each test now also asserts that the thing it
+   measures actually happened.
+
+</details>
 
 ---
 
-## Limitations
+## Status and limitations
 
-- **No GPU numbers.** The CUDA path is written, compiles, and its coloring is
-  verified, but it has not executed. GPU/CPU parity, bitwise determinism and
-  GPU throughput are unmeasured. There is no Nsight profile.
-- **Static results are relaxed, not directly solved,** and converging them costs
-  a sweep budget quadratic in the segment count.
-- **Mesh sweeps are modest:** n ≤ 64 for the cantilever, ≤ 32 for the moment and
-  twist-buckling cases.
-- **Energy is characterized, not conserved.** The integrator dissipates; the
-  dissipation and any spurious gain only shrink with substepping.
-- **Contact against primitives is per particle** (the rod is a chain of spheres
-  to the world), accurate while segments are no longer than about their
-  diameter. Contacts apply no torque to material frames.
-- **The stability rule is measured on one scenario** (gravity cantilever) and
-  holds only while elements are longer than the rod's diameter.
-- **The capstan rope uses an unphysical density** to keep the dynamics used to
-  detect slip stable; the static threshold it measures does not depend on mass.
-- **Not built:** the optional Python binding and policy-learning demo.
+**Working and validated:** CPU simulator, contact and friction,
+self-collision, direct statics, GPU port (parity, determinism, throughput),
+continuous integration.
+
+**Open** (tracked in [`REMAINING.md`](REMAINING.md)):
+
+- **Timestep stability study is being redesigned.** The old study was
+  invalidated by the stiffness-frame fix, and its two tests currently fail.
+- **The GPU runs gravity-loaded rods only.** Contacts, friction,
+  self-collision and applied loads are CPU-only for now. There is no profiler
+  study yet.
+- Contact with the world is per particle (fine while segments are no longer
+  than the rope's diameter), and contacts apply no torque to frames.
+- The integrator dissipates energy slightly; this shrinks with more substeps.
+
+Background: the original plan with its phase gates is in
+[`gpu-cosserat-rod-simulator-plan.md`](gpu-cosserat-rod-simulator-plan.md).
