@@ -80,8 +80,14 @@ class Batch {
     // Copy one environment's state back into a host rod, which must have the
     // same topology as the prototype.
     void download(int rodIndex, Rod& out) const;
-    // Re-upload every environment from a host rod (all environments identical).
+    // Re-upload every environment from a host rod (all environments identical),
+    // including its applied loads.
     void upload(const Rod& in);
+    // Set one environment's applied loads from a host rod with the same
+    // topology: extForce per particle, extTorque per segment, and the
+    // orientation of every fixed frame (zero inertia). Updating a fixed frame's
+    // orientation between steps is how an end is driven, e.g. twisted.
+    void setLoads(int rodIndex, const Rod& source);
 
     int numRods() const { return numRods_; }
     int numSegments() const { return numSegments_; }

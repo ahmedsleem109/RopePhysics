@@ -370,7 +370,7 @@ strategies: bitwise identical.
 |---|---|---|---|
 | 1 rod | 1.8 M | 0.5 M | 5.8 M |
 | 256 rods | 24.4 M | 125 M | 853 M |
-| 16 384 rods | — | 694 M | **1 173 M** |
+| 16 384 rods | — | 654 M | **1 162 M** |
 
 - **Launch overhead dominates small batches.** Multi-kernel issues 64 launches
   per step at 8 substeps; at one rod that is ~1 ms per step (~15 µs per launch),
@@ -379,19 +379,27 @@ strategies: bitwise identical.
   fills the device; beyond it throughput is flat. Multi-kernel keeps climbing
   until ~16 k rods and saturates at ~0.6× the fused rate, the cost of reloading
   state between 64 launches.
-- **Rod length** helps the fused path (1.1 B at 64 segments, 1.86 B at 256): the
+- **Rod length** helps the fused path (1.1 B at 64 segments, 1.79 B at 256): the
   per-block synchronization cost is amortized over more constraints per colour.
   Multi-kernel is flat above 64 segments.
 - **Substeps:** fused throughput rises 1.5× from 1 to 32 substeps (0.78 B to
   1.17 B) as the per-step load/store is amortized; multi-kernel is flat at
   ~0.62 B, since its launches scale with substeps.
-- The fused path fits rods up to 472 segments in shared memory
-  (`104 n + 24` bytes).
+- The fused path fits rods up to 383 segments in shared memory
+  (`128 n + 36` bytes, including per-rod applied loads).
 
 ![GPU throughput](figs/throughput_gpu.png)
 
-No Nsight profile has been taken yet, and contacts, self-collision and external
-loads still exist only on the CPU.
+**Applied loads and driven ends.** Forces per particle, world torques per
+segment and fixed-frame orientations are per-rod device state, set with
+`Batch::setLoads`. The parity case has a second scenario with a tip force, a
+mid-rod torque and a root frame twisted every step. It matches the CPU to
+4.9e-8 m after one step, which is 0.4% of what those loads move the rod in that
+step, so a device ignoring them would fail. Carrying the loads cost 4% of peak
+throughput and cut the largest fused rod from 472 to 383 segments.
+
+No Nsight profile has been taken yet, and contacts and self-collision still
+exist only on the CPU.
 
 ---
 
@@ -479,8 +487,8 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 This is the section that matters most, so it is specific.
 
 - **The GPU path is partial.** Parity, determinism and throughput are measured
-  (§5), but only for gravity-loaded rods: contacts, self-collision, external
-  loads and driven ghost frames are CPU-only, and there is no profiler output.
+  (§5), including applied loads and driven ends, but contacts and
+  self-collision are CPU-only, and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
 - **The timestep envelope is one scenario deep** (§6): a gravity swing, 16–64
   segments. Contact-driven and whipping motion are not covered.

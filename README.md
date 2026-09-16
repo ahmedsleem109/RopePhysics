@@ -42,8 +42,9 @@ simulator's output (`rodsim scene drape|grid`, then
 - **Self-collision**, so a rope can coil into a pile without passing through
   itself.
 - **Clamped, pinned and twisted ends**, and applied forces and torques.
-- **Batched GPU simulation**: thousands of rods stepped in parallel, with results
-  that match the CPU and are bit-for-bit repeatable.
+- **Batched GPU simulation**: thousands of rods stepped in parallel, with applied
+  forces, torques and driven (e.g. twisted) ends, matching the CPU and bit-for-bit
+  repeatable.
 - **Direct static solver**: finds the resting shape of a loaded rod in
   milliseconds, used to check accuracy.
 
@@ -68,7 +69,7 @@ segments are halved in length, as the theory says it should.
 | Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
 | Timestep accuracy (swinging cantilever) | strain error under 1% | limit at **1–3%** of a segment moved per substep |
 | Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
-| GPU vs CPU | same trajectory | **2e-8 m** after one step; drift matches float rounding |
+| GPU vs CPU, with loads and a driven twist | same trajectory | **5e-8 m** after one step; drift matches float rounding |
 
 <table>
 <tr>
@@ -94,8 +95,8 @@ completed per second. 64-segment rods, 8 substeps.
 | hardware | throughput |
 |---|---|
 | CPU, 16 threads | **25 M** /s |
-| Laptop GPU (RTX 3060), 16 384 rods | **1.17 B** /s — about **47×** the CPU |
-| Same GPU, 2 048 rods × 256 segments | **1.86 B** /s |
+| Laptop GPU (RTX 3060), 16 384 rods | **1.16 B** /s — about **47×** the CPU |
+| Same GPU, 2 048 rods × 256 segments | **1.79 B** /s |
 
 <img src="docs/figs/throughput_gpu.png" alt="Throughput vs batch size and rod length, CPU and GPU">
 
@@ -236,9 +237,9 @@ continuous integration.
 - **The timestep guidance is one scenario deep.** To keep strain error under
   1%, material should move no more than about 1–3% of a segment length per
   substep. That was measured on a swinging cantilever only.
-- **The GPU runs gravity-loaded rods only.** Contacts, friction,
-  self-collision and applied loads are CPU-only for now. There is no profiler
-  study yet.
+- **GPU contact is not ported yet.** Gravity, applied forces and torques and
+  driven ends run on the GPU; contacts, friction and self-collision are
+  CPU-only for now. There is no profiler study yet.
 - Contact with the world is per particle (fine while segments are no longer
   than the rope's diameter), and contacts apply no torque to frames.
 - The integrator dissipates energy slightly; this shrinks with more substeps.

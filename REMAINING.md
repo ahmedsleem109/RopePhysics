@@ -30,7 +30,7 @@ compile; they have never executed.
       bandwidth- vs latency-bound. Save screenshots into `docs/`.
 - [x] Launch overhead: ~15 µs/launch; 1 ms/step multi-kernel vs 88 µs fused
       at one rod (11×); 0.6× fused at saturation.
-- [x] Fused shared-memory limit on the device: 472 segments.
+- [x] Fused shared-memory limit on the device: 383 segments (`128 n + 36` bytes).
 - [ ] Run the **entire** Phase 1–2 suite on the GPU path (plan's Phase 3 gate),
       not just the parity trajectory. Contacts and self-collision currently
       exist only on the CPU — see item 3.
@@ -43,8 +43,9 @@ compile; they have never executed.
       scan (CPU version mirrors these stages in `collision.cpp`).
 - [ ] Contact constraints need colouring too: re-colour per step, or use a
       Jacobi-style pass for contacts. Decide and measure.
-- [ ] External forces/torques on the GPU (GPU path supports gravity only).
-- [ ] Ghost frames with driven orientation (used by twist cases) on the GPU.
+- [x] External forces/torques on the GPU (`Batch::setLoads`); parity scenario
+      "loaded" matches the CPU to 4.9e-8 m after one step.
+- [x] Driven fixed frames on the GPU (same API; root twist in the parity case).
 
 ## 4. Phase 4 GPU deliverables
 

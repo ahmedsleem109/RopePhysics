@@ -144,64 +144,102 @@ CaseResult runGpuParity(const std::string& outDir) {
     // had no time to grow and any kernel bug shows at full size, and against
     // the measured float drift at step 200. The two strategies run the same
     // kernel code in a different launch structure and must agree exactly.
+    //
+    // Two scenarios. "gravity" is the benchmark rod swinging under its own
+    // weight. "loaded" adds every other input the GPU accepts: a force on the
+    // tip particle, a torque on the middle segment, and the root's fixed frame
+    // driven round the rod axis a little every step (which is how a twist is
+    // imposed), uploaded to the device through Batch::setLoads.
     Csv csv(outDir, "gpu_parity.csv",
-            "segments,steps,strategy,max_dx,max_dq,ordering_only_dx");
+            "scenario,segments,steps,strategy,max_dx,max_dq,ordering_only_dx");
 
+    struct Scenario {
+        const char* name;
+        bool loaded;
+    };
+    const Scenario scenarios[] = {{"gravity", false}, {"loaded", true}};
     const std::vector<int> checkpoints = {1, 10, 50, 200};
     double worstFirst = 0, worstFinal = 0, strategyGap = 0;
-    for (int n : {16, 48, 128}) {
-        const Rod prototype = makeBenchmarkRod(n);
-        const SolverParams p = benchmarkParams();
 
-        const Coloring sc = colorStretchConstraints(prototype);
-        const Coloring bc = colorBendConstraints(prototype);
-        SolverParams pc = p;
-        pc.stretchColoring = &sc;
-        pc.bendColoring = &bc;
-
-        // CPU in the GPU's order, and in index order to size the ordering effect.
-        Rod cpuColored = prototype, cpuSequential = prototype;
-
-        gpu::Batch multi, fused;
-        const bool haveMulti = multi.create(prototype, 1, gpu::Strategy::kMultiKernel);
-        const bool haveFused = fused.create(prototype, 1, gpu::Strategy::kFused);
-        if (!haveFused) res.notes.push_back(fmt("  n=%.0f does not fit the fused path", double(n)));
-        const gpu::BatchParams bp = toBatchParams(p);
-
-        int done = 0;
-        for (int cp : checkpoints) {
-            for (; done < cp; ++done) {
-                step(cpuColored, pc);
-                step(cpuSequential, p);
-                if (haveMulti) multi.step(bp);
-                if (haveFused) fused.step(bp);
+    for (const Scenario& sc : scenarios) {
+        for (int n : {16, 48, 128}) {
+            Rod prototype = makeBenchmarkRod(n);
+            const int rootFrame = static_cast<int>(prototype.state.numSegments()) - 1;
+            const Quat rootRest = prototype.state.q[rootFrame];
+            if (sc.loaded) {
+                prototype.state.extForce.back() = Vec3(0, Real(0.02), Real(0.05));
+                prototype.state.extTorque[n / 2] = Vec3(Real(2e-3), 0, Real(-1e-3));
             }
-            const double orderingOnly = maxPositionDifference(cpuColored, cpuSequential);
-            Rod fromMulti = prototype, fromFused = prototype;
-            if (haveMulti) {
-                multi.synchronize();
-                multi.download(0, fromMulti);
-            }
-            if (haveFused) {
-                fused.synchronize();
-                fused.download(0, fromFused);
-            }
-            if (haveMulti && haveFused)
-                strategyGap = std::max(strategyGap, maxPositionDifference(fromMulti, fromFused));
+            // Twist the root by 0.5 rad per second of simulated time.
+            auto drive = [&](Rod& rod, int stepIndex) {
+                if (!sc.loaded) return;
+                const Real angle = Real(0.5e-3) * Real(stepIndex + 1);
+                rod.state.q[rootFrame] = normalize(quatAxisAngle(Vec3(1, 0, 0), angle) * rootRest);
+            };
+            const SolverParams p = benchmarkParams();
 
-            for (int s = 0; s < 2; ++s) {
-                if (!(s == 0 ? haveMulti : haveFused)) continue;
-                const Rod& g = s == 0 ? fromMulti : fromFused;
-                const double dx = maxPositionDifference(cpuColored, g);
-                const double dq = maxOrientationDifference(cpuColored, g);
-                if (cp == checkpoints.front()) worstFirst = std::max(worstFirst, dx);
-                if (cp == checkpoints.back()) worstFinal = std::max(worstFinal, dx);
-                csv.row(n, cp, s == 0 ? "multikernel" : "fused", dx, dq, orderingOnly);
+            const Coloring stretchColors = colorStretchConstraints(prototype);
+            const Coloring bendColors = colorBendConstraints(prototype);
+            SolverParams pc = p;
+            pc.stretchColoring = &stretchColors;
+            pc.bendColoring = &bendColors;
+
+            // CPU in the GPU's order, and in index order to size the ordering effect.
+            Rod cpuColored = prototype, cpuSequential = prototype;
+
+            gpu::Batch multi, fused;
+            const bool haveMulti = multi.create(prototype, 1, gpu::Strategy::kMultiKernel);
+            const bool haveFused = fused.create(prototype, 1, gpu::Strategy::kFused);
+            if (!haveFused)
+                res.notes.push_back(fmt("  n=%.0f does not fit the fused path", double(n)));
+            const gpu::BatchParams bp = toBatchParams(p);
+
+            int done = 0;
+            double finalDx = 0, finalOrdering = 0;
+            for (int cp : checkpoints) {
+                for (; done < cp; ++done) {
+                    drive(cpuColored, done);
+                    drive(cpuSequential, done);
+                    if (sc.loaded) {
+                        if (haveMulti) multi.setLoads(0, cpuColored);
+                        if (haveFused) fused.setLoads(0, cpuColored);
+                    }
+                    step(cpuColored, pc);
+                    step(cpuSequential, p);
+                    if (haveMulti) multi.step(bp);
+                    if (haveFused) fused.step(bp);
+                }
+                const double orderingOnly = maxPositionDifference(cpuColored, cpuSequential);
+                Rod fromMulti = prototype, fromFused = prototype;
+                if (haveMulti) {
+                    multi.synchronize();
+                    multi.download(0, fromMulti);
+                }
+                if (haveFused) {
+                    fused.synchronize();
+                    fused.download(0, fromFused);
+                }
+                if (haveMulti && haveFused)
+                    strategyGap = std::max(strategyGap, maxPositionDifference(fromMulti, fromFused));
+
+                for (int s = 0; s < 2; ++s) {
+                    if (!(s == 0 ? haveMulti : haveFused)) continue;
+                    const Rod& g = s == 0 ? fromMulti : fromFused;
+                    const double dx = maxPositionDifference(cpuColored, g);
+                    const double dq = maxOrientationDifference(cpuColored, g);
+                    if (cp == checkpoints.front()) worstFirst = std::max(worstFirst, dx);
+                    if (cp == checkpoints.back()) {
+                        worstFinal = std::max(worstFinal, dx);
+                        finalDx = std::max(finalDx, dx);
+                    }
+                    csv.row(sc.name, n, cp, s == 0 ? "multikernel" : "fused", dx, dq, orderingOnly);
+                }
+                if (cp == checkpoints.back()) finalOrdering = orderingOnly;
             }
-            if (cp == checkpoints.back())
-                res.notes.push_back(fmt("  n=%.0f: colour ordering alone moves the CPU trajectory "
-                                        "by %.3g m over %.0f steps",
-                                        double(n), orderingOnly, double(cp)));
+            res.notes.push_back(std::string("  ") + sc.name +
+                                fmt(", n=%.0f: GPU-CPU %.3g m after 200 steps (colour ordering "
+                                    "alone moves the CPU %.3g m)",
+                                    double(n), finalDx, finalOrdering));
         }
     }
 
@@ -209,6 +247,22 @@ CaseResult runGpuParity(const std::string& outDir) {
                             "(float-vs-double CPU alone: 5e-9 and 2.5e-4)",
                             worstFirst, worstFinal));
     res.checks.push_back(makeCheck("GPU matches CPU after one step", worstFirst, 0.0, 1e-7, 1.0));
+
+    // The one-step check only means something if one step is enough for the
+    // loads to matter: a device that ignored them must fail it. Size what the
+    // loads change in one step on the CPU and require the GPU error to be far
+    // below that.
+    {
+        Rod plain = makeBenchmarkRod(16), loaded = makeBenchmarkRod(16);
+        loaded.state.extForce.back() = Vec3(0, Real(0.02), Real(0.05));
+        loaded.state.extTorque[8] = Vec3(Real(2e-3), 0, Real(-1e-3));
+        step(plain, benchmarkParams());
+        step(loaded, benchmarkParams());
+        const double loadEffect = maxPositionDifference(plain, loaded);
+        res.notes.push_back(fmt("  one step of the loads moves the rod %.3g m", loadEffect));
+        res.checks.push_back(makeRangeCheck("one-step GPU error under 1% of the load effect",
+                                            worstFirst / loadEffect, 0.0, 0.01));
+    }
     res.checks.push_back(
         makeCheck("GPU drift at 200 steps within float rounding", worstFinal, 0.0, 1e-3, 1.0));
     res.checks.push_back(
