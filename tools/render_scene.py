@@ -253,6 +253,10 @@ def default_camera(name, frame=0, total=1):
         # A slow quarter orbit over the clip keeps a static field readable in 3D.
         angle = -2.2 + 0.5 * math.pi * frame / max(1, total)
         return orbit_camera((0.0, 0.0, 0.2), 5.0, 2.6, angle, fov=46)
+    if name == "harness-top":
+        return Camera((0.45, -0.3, 1.9), (0.45, -0.3, 0.0), fov_deg=45, up=(0, 1, 0))
+    if name == "harness":
+        return Camera((0.45, -1.25, 1.05), (0.45, -0.25, 0.0), fov_deg=45)
     if name == "cable-hanging":
         return Camera((0.0, -3.0, 1.0), (0.0, 0.0, 0.58), fov_deg=42)
     return Camera((2, -2, 1.5), (0, 0, 0.5))

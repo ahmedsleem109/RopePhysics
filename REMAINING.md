@@ -1,12 +1,142 @@
 # What remains to build
 
-State at the end of the first build session: every case in `rodsim all` passes
-(exit 0), with the three GPU cases **skipped**, not passed. See `README.md` for
-results and `docs/writeup.md` for the full account.
+## ▶ START HERE — next session (written 2026-09-17)
 
-Items are in priority order. Each says what "done" means.
+**Goal:** a demo video that a robotics-simulation company (target: Vsim,
+Manchester; founded by ex-NVIDIA PhysX engineers; pitch is "AI agents learn
+complex tasks in accurately simulated worlds, orders of magnitude faster")
+understands in seconds: **a robot arm routing a wire harness, learned in
+simulation across thousands of randomized cables on the GPU.** Abstract physics
+demos (ropes on a field, cables sliding off bars) did not communicate value; the
+video must show a robot doing a real factory job.
+
+### State of the branch `feature/harness-routing` (pushed, NOT merged)
+
+Committed and working:
+- `Batch::setMaterialScales(youngsScale, frictionScale)` — per-rod stiffness and
+  friction randomization on the GPU, verified against CPU rods built with those
+  materials (`gpu-parity`, error 0.7% / 0.1% of the effect).
+
+Committed as work in progress (compiles, last run OK, not validated):
+- `src/apps/harness_routing.{h,cpp}` — the task definition `apps::HarnessTask`:
+  - board: plane z=0 (mu 0.5), peg A (0.25,0), peg B (0.55,0) capsules r=12 mm
+    h=6 cm; clip = two posts r=6 mm at (0.85, ±0.018), h=4 cm;
+  - cable 1.2 m, 120 segments, r=4 mm, E_ref=5 MPa; particle 0 pinned at the
+    connector (0,0); last particle pinned = gripper, driven by
+    `kinematicVelocity`; cable starts straight along -y;
+  - params: dt 1 ms, 4 substeps x 4 iterations (float margin ~5x; do not go to
+    8+ substeps, see HangingCable::params for the float false-sticking bug);
+  - policy = 5 gripper waypoints (x,y) on a fixed schedule `legSeconds`
+    {2.4,0.7,0.7,0.8,0.7} + 1 s hold, smoothstep per leg;
+  - `evaluate()`: under A / over B by where the cable crosses x=peg.x, within
+    pegRadius + r + 1.5 cm ("laid against the peg"); through clip by crossing
+    x=clip.x with |y| < inner gap; smooth `score` for learning.
+- `rodsim scene harness` (src/validation/scenes.cpp): runs one policy on the CPU,
+  writes out/scenes/harness.rodtraj + harness.gripper.csv (gripper path) +
+  json, prints the outcome. Replays `out/scenes/harness.policy` ("x y" per
+  line) if present, else `handWrittenPolicy()`.
+- tools/render_scene.py: camera presets `harness` (oblique) and `harness-top`.
+
+Findings so far:
+- The hand-written policy FAILS (good for the story): the cable passes the
+  right sides but with a slack loop near the connector, never laid against peg
+  A, and 8 mm off the clip centre.
+- A tuned policy was written to out/scenes/harness.policy but NOT yet run:
+  `0.20 -0.06 / 0.40 0.0 / 0.55 0.07 / 0.75 -0.004 / 1.20 -0.008`
+  (pull 35 cm past the clip to take up slack; aim slightly -y through the clip).
+  Last build of scenes.cpp had an escaped-newline fix applied just before the
+  interruption: rebuild first.
+
+### Build next, in order
+
+1. **Prove a successful routing exists.** Rebuild (`cmd //c "D:\ropephysics\build.cmd"`),
+   `build\rodsim.exe scene harness` with the tuned policy, render the last frame
+   top-down (`render_scene.default_camera('harness-top', ...)`). Iterate
+   waypoints until ROUTED. If pegs are too easy to slip over or the route can't
+   be taut, adjust geometry (peg positions, cable length) — keep it plausible
+   for a harness board.
+2. **GPU evaluation of many (policy, cable) pairs.** In
+   `src/validation/application_cases.cpp` (or a new `harness_cases.cpp`):
+   one fused batch of N rods (start 1024, then 4096) with the harness world;
+   each rod gets a policy + `setMaterialScales` (E x 0.4..4, mu x 0.6..1.4);
+   upload gripper velocities with `setKinematicVelocities` only at
+   `legStarts()` — BUT gripperVelocity uses smoothstep, which changes every
+   step: switch legs to constant velocity (linear) or accept one upload every
+   ~20 ms. Evaluate with `downloadPositions` at the end. CPU cross-check a few
+   rods (same verdict).
+3. **Learning loop (cross-entropy method).** Mean/std over the 10 waypoint
+   numbers; each iteration samples N policies, each on a random cable; score =
+   `Outcome::score` (success = 3); elites = top 10%; refit; 8-10 iterations.
+   Report success rate per iteration and wall time. Then evaluate the final
+   mean policy on 1024 fresh random cables → robust success rate. Output
+   `docs/data/harness_learning.csv` (iteration, success_rate, mean_score,
+   seconds) and final shapes of a 16x16 subset per iteration for the grid view.
+   New case `rodsim harness-learning` (skips without CUDA).
+4. **Robot arm rendering.** In tools/render_scene.py, draw an arm from the
+   gripper path (harness.gripper.csv): base column beside the board, 2-link
+   IK in the vertical plane through base and gripper, wrist down to a
+   two-finger gripper, as capsules in the painter's sort with the rod. Board as
+   a visible slab, pegs/clip coloured, connector box at (0,0). Caption says the
+   arm follows the simulated gripper path.
+5. **Video** (tools/make_harness_video.py, ~40 s, 1280x720 MP4 + README GIF):
+   title "Teaching a robot to route a wire harness" → naive policy close-up
+   (fails, red label) → top-down grid of 256 boards per iteration, green/red,
+   "iteration k: X% of N attempts routed, T s on a laptop GPU" → learned
+   policy on a soft and a stiff cable close-up (succeeds) → end card with
+   numbers and "physics validated against beam theory, capstan equation, CPU
+   reference". Send the MP4 to the user.
+6. **README:** replace the cable-hanging lead section with this story (keep
+   cable-hanging lower down as the validation of friction). Writeup section.
+7. Merge `feature/harness-routing` to main, push, dispatch CI
+   (`gh workflow run validation.yml -R ahmedsleem109/RopePhysics --ref main`).
+
+### Working notes that cost time this session
+- Build from Git Bash: `cmd //c "D:\ropephysics\build.cmd"`; rodsim.exe cannot
+  relink while running.
+- Python patch scripts via heredoc mangle `\n` inside C string literals — write
+  C++ edits with the Edit/Write tools, not heredoc'd Python.
+- WSL Ubuntu has g++ (use for float-vs-double builds with `-DCRS_REAL_FLOAT`);
+  run WSL scripts via PowerShell `wsl -d Ubuntu -- bash /mnt/c/...script.sh`.
+- Pushes: SSH key is not on GitHub; push with
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push https://github.com/ahmedsleem109/RopePhysics.git <branches>`.
+  Pushes do not trigger CI (unknown why); dispatch manually.
+- Workflow the user asked for: each feature on its own branch, merged to main
+  with --no-ff, pushed.
 
 ---
+
+## Earlier backlog (still open)
+
+- **GPU:** Nsight profiling (occupancy, bandwidth, latency-bound kernels,
+  screenshots into docs/); run the full Phase 1–2 suite on the GPU path;
+  colour self contacts per rod (self-collision costs ~11x throughput);
+  re-measure GPU headline numbers on a cool GPU (thermal drift seen: 1.16 B →
+  0.94 B within a session).
+- **Friction creep:** a cable resting on a bar creeps ~2 mm/s even at 2x the
+  needed friction (per-particle contact ratcheting). Try segment-based contact
+  or a static-friction anchor per contact; it biases hold/slip answers.
+- **Validation gaps:** timestep-refinement convergence study; tip-load and
+  twist-buckling mesh sweeps beyond n=32 (twist buckling converges at slope
+  0.82 — explain or improve); timestep envelope beyond one scenario
+  (contact-driven, whipping); capstan mu sweep; contact torque (rolling /
+  torsional friction); segment-based rod–primitive contact.
+- **CI:** find why pushes don't trigger workflows; bump actions to Node 24
+  versions (checkout@v5, setup-python@v6, upload-artifact@v5); consider a
+  shorter per-commit suite (twist buckling 9 min, capstan 3 min).
+- **Media:** re-render the long demo video (tools/make_video.py) with the fixed
+  solver, GPU numbers and repo link
+  (`--repo "https://github.com/ahmedsleem109/RopePhysics"`); host demo.mp4 as a
+  GitHub release asset.
+- **Optional:** Python binding; policy-learning task (the harness learning loop
+  above covers this).
+
+Detailed history of what was done (GPU bring-up, direct statics, frame bug,
+timestep envelope, GPU loads/contacts/self-collision, cable hanging) is in
+git log, README and docs/writeup.md.
+
+---
+
+## Completed items log (from earlier sessions)
 
 ## 1. Get the GPU running (blocks all of Phase 3 and half of Phase 4)
 

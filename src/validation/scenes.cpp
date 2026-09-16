@@ -33,6 +33,7 @@
 
 #include "../core/collision.h"
 #include "../apps/cable_hanging.h"
+#include "../apps/harness_routing.h"
 #include "../core/coloring.h"
 #include "../core/solver.h"
 #include "support.h"
@@ -423,9 +424,76 @@ int sceneCableHanging(const std::string& outDir) {
     return 0;
 }
 
+// ---------------------------------------------------------------- harness
+//
+// One attempt at routing the harness with the hand-written policy, on the CPU,
+// for looking at: the cable trajectory, plus a sidecar CSV of the gripper's
+// path so the renderer can draw the robot holding it.
+int sceneHarness(const std::string& outDir) {
+    const apps::HarnessTask task;
+    apps::HarnessTask::Policy policy = task.handWrittenPolicy();
+    // A policy to replay instead, if <outDir>/harness.policy exists: one "x y"
+    // pair per waypoint (the learning case writes one).
+    if (std::FILE* pf = std::fopen((outDir + "/harness.policy").c_str(), "r")) {
+        for (Vec3& w : policy) {
+            double x = 0, y = 0;
+            if (std::fscanf(pf, "%lf %lf", &x, &y) == 2) w = Vec3(Real(x), Real(y), 0);
+        }
+        std::fclose(pf);
+        std::printf("harness: replaying %s/harness.policy\n", outDir.c_str());
+    }
+    Rod rod = task.build();
+    const CollisionWorld world = task.world();
+    SolverParams p = task.params();
+    SolverContext ctx;
+
+    const float fps = 60;
+    const int stepsPerFrame = int(std::lround(1.0 / (fps * double(p.dt))));
+    const int frames = task.steps() / stepsPerFrame;
+
+    TrajectoryWriter traj(outDir + "/harness.rodtraj", frames, 1, task.segments + 1,
+                          float(task.material().radius), fps);
+    std::FILE* grip = std::fopen((outDir + "/harness.gripper.csv").c_str(), "w");
+    if (!traj.ok() || !grip) return 1;
+    std::fprintf(grip, "frame,x,y,z\n");
+
+    SceneTotals totals;
+    int stepIndex = 0;
+    const std::vector<const Rod*> views = {&rod};
+    for (int f = 0; f < frames; ++f) {
+        const auto t0 = Clock::now();
+        for (int s = 0; s < stepsPerFrame; ++s, ++stepIndex) {
+            rod.state.kinematicVelocity.back() =
+                task.gripperVelocity(policy, Real(stepIndex) * p.dt);
+            step(rod, p, world, ctx);
+        }
+        const double wall = std::chrono::duration<double>(Clock::now() - t0).count();
+        totals.wallSeconds += wall;
+        totals.simSeconds += double(p.dt) * stepsPerFrame;
+        totals.segmentSubsteps += double(task.segments) * stepsPerFrame * p.substeps;
+        traj.frame(float(wall), views, {});
+        const Vec3 g = rod.state.x.back();
+        std::fprintf(grip, "%d,%g,%g,%g\n", f, double(g.x), double(g.y), double(g.z));
+    }
+    std::fclose(grip);
+
+    const auto outcome = task.evaluate(rod.state.x);
+    writeJson(outDir + "/harness.json", "harness",
+              "A robot routes a cable: under peg A, over peg B, through the clip", world,
+              float(task.material().radius), fps, frames, 1, task.segments + 1, totals, p,
+              stepsPerFrame);
+    std::printf("harness: under A %s (%+.3f), over B %s (%+.3f), through clip %s (miss %.3f) -> "
+                "%s (score %.2f)\n",
+                outcome.belowA ? "yes" : "no", outcome.sideA, outcome.aboveB ? "yes" : "no",
+                outcome.sideB, outcome.throughClip ? "yes" : "no", outcome.clipMiss,
+                outcome.success() ? "ROUTED" : "FAILED", outcome.score);
+    return 0;
+}
+
 }  // namespace
 
 int runScene(const std::string& name, const std::string& outDir) {
+    if (name == "harness") return sceneHarness(outDir);
     if (name == "drape") return sceneDrape(outDir);
     if (name == "grid") return sceneGrid(outDir);
     if (name == "cable-hanging") return sceneCableHanging(outDir);

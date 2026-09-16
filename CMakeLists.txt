@@ -14,6 +14,7 @@ add_library(crs_core
   src/core/solver.cpp
   src/core/statics.cpp
   src/apps/cable_hanging.cpp
+  src/apps/harness_routing.cpp
 )
 target_include_directories(crs_core PUBLIC src)
 
