@@ -500,7 +500,58 @@ points, and which points touch keeps changing.
 
 ---
 
-## 7. How large a timestep is accurate
+## 7. Application: a robot learns to route a wire harness
+
+Wiring looms are still largely routed by hand. A worker pulls each cable along
+a board, around pegs and into clips. `src/apps/harness_routing.h` defines one
+such job: a 1.2 m, 8 mm cable plugged into a connector must pass **under peg A,
+over peg B and through a clip**, laid against the pegs, not looped past them.
+The pegs sit 6 cm off the connector–clip line, so a routed cable makes an S.
+The robot's decision is its motion: five gripper waypoints on a fixed 5.3 s
+schedule, smooth within each leg, sent as a constant velocity per 10 ms
+control tick (so a GPU batch uploads velocities every 10 steps, not every
+step). What it does not control is the cable: stiffness varies 0.4–4× (log-uniform),
+friction 0.6–1.4×.
+
+**Scoring.** Where the cable crosses the line x = peg.x decides the side. A peg
+counts once the crossing is within 1.5 cm of touching. The clip counts when
+the crossing lies between the post centres. For learning, each requirement
+scores up to 1: a peg gets 1 when the cable is laid against its correct side,
+fading to 0.5 further away and 0 on the wrong side, so 3 means routed. A first
+version scored by distance from the peg and rewarded exactly the slack loops
+the job forbids.
+
+**Learning.** A cross-entropy method over the 10 waypoint coordinates, starting
+from a hand-written motion. Each iteration samples 1024 motions and pairs each
+with its own random cable, all in one GPU batch (`Batch::setMaterialScales`).
+It then refits a Gaussian to the top 10%. Run as `rodsim harness-learning`:
+
+| iteration | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| attempts routed | 2% | 9% | 26% | 40% | 59% | 73% | 81% | 81% | 79% | 86% |
+
+Each iteration simulates 1024 × 6.3 s of cable (120 segments, 4 substeps × 4
+sweeps, five contact primitives) in 12.6 s on a laptop RTX 3060. Ten take
+127 s. The per-iteration rate includes the sampling noise. The final mean
+motion routes **1024 of 1024 fresh random cables**. The hand-written motion
+routes **0 of the same 1024**. On the reference cable it leaves a slack loop past peg A.
+
+**Trust.** The softest and stiffest fresh cables are re-simulated on the
+double-precision CPU under both motions. The verdicts match the GPU (4 of 4).
+The learned motion also routes on the CPU at both corners of the range
+(E × 0.4, μ × 1.4 and E × 4, μ × 0.6), which are the video's close-ups. The
+material randomization itself was checked against CPU rods built with those
+materials (`gpu-parity`).
+
+**Two things the task needed first.** With the pegs on one line the routed
+cable was a 1.6 cm wiggle: correct, but it did not show a robot doing anything.
+The clip test also rejected cables resting against the inside of a post. Hard
+pulls press the cable 1–2 mm into it, so "inside the gap" became "between the
+post centres".
+
+---
+
+## 8. How large a timestep is accurate
 
 "XPBD is unconditionally stable" is true in the sense that it rarely explodes,
 and that is exactly why it is the wrong question. A rod can run for ever
@@ -554,7 +605,7 @@ covered.
 
 ---
 
-## 8. Throughput (CPU)
+## 9. Throughput (CPU)
 
 Batched independent rods, stepped across threads. The unit is segment-substeps
 per second, because a substep is the unit of solver work and counting frame steps
@@ -579,7 +630,7 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 
 ---
 
-## 9. Limitations
+## 10. Limitations
 
 This is the section that matters most, so it is specific.
 
@@ -587,7 +638,7 @@ This is the section that matters most, so it is specific.
   (§5) for every feature, but self-collision costs about 11× in throughput,
   and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
-- **The timestep envelope is one scenario deep** (§7): a gravity swing, 16–64
+- **The timestep envelope is one scenario deep** (§8): a gravity swing, 16–64
   segments. Contact-driven and whipping motion are not covered.
 - **The demo scenes were simulated before the material-frame fix** and should
   be re-run.
@@ -605,10 +656,13 @@ This is the section that matters most, so it is specific.
   than the rod's diameter.
 - **The demo video's simulations ran on the CPU,** and it says so on screen,
   with the measured wall-clock cost per simulated second.
-- **Not attempted:** the optional Python binding and policy-learning task, and
-  the distribution work in the plan, which is not engineering.
+- **The harness policy is open loop:** five waypoints on a fixed schedule, no
+  sensing. It is robust across the randomized cables, not to a board that
+  moves or a cable that starts somewhere else.
+- **Not attempted:** the optional Python binding, and the distribution work in
+  the plan, which is not engineering.
 
-## 10. What I would build next
+## 11. What I would build next
 
 Update the driver and run the three GPU cases — parity first, because a fused
 kernel that is fast and wrong is worth nothing. Then replace the relaxed static

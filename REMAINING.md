@@ -1,12 +1,72 @@
 # What remains to build
 
-State at the end of the first build session: every case in `rodsim all` passes
-(exit 0), with the three GPU cases **skipped**, not passed. See `README.md` for
-results and `docs/writeup.md` for the full account.
+## Wire-harness demo (branch `feature/harness-routing`, 2026-09-17)
 
-Items are in priority order. Each says what "done" means.
+Goal: a demo a robotics-simulation company (target: Vsim) gets in seconds, a
+robot arm routing a wire harness, learned on the GPU across randomized cables.
+
+Done:
+- Task `apps::HarnessTask`: pegs offset into an S-route, score 3 = routed and
+  laid against the pegs, clip = between post centres, 10 ms gripper control.
+- `rodsim harness-learning`: CEM, 10 x 1024 attempts, 2% -> 86% in 127 s; the
+  learned motion routes 1024/1024 fresh cables, hand-written 0/1024; CPU/GPU
+  agree 4/4. Deterministic (bitwise-identical rerun).
+- `rodsim scene harness --out <dir>` replays `<dir>/harness.policy` and
+  `<dir>/harness.cable` ("youngsScale frictionScale").
+- Renderer: board, pegs, clip, connector, IK arm on the gripper path.
+- `tools/make_harness_video.py` -> out/video/harness.mp4 + docs/media/harness.gif.
+- README lead section and writeup §7.
+
+Left: merge to main with --no-ff, push, dispatch CI
+(`gh workflow run validation.yml -R ahmedsleem109/RopePhysics --ref main`).
+Ideas: closed-loop policy (observe cable), randomize the cable's start pose,
+Nsight-profile the learning batch.
+
+### Working notes
+- Build from Git Bash: `cmd //c "D:\ropephysics\build.cmd"`; rodsim.exe cannot
+  relink while running.
+- Python patch scripts via heredoc mangle backslash escapes (newlines in C
+  string literals, Windows paths): write those with the Edit/Write tools.
+- WSL Ubuntu has g++ (use for float-vs-double builds with `-DCRS_REAL_FLOAT`).
+- Pushes: SSH key is not on GitHub; push with
+  `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push https://github.com/ahmedsleem109/RopePhysics.git <branches>`.
+  Pushes do not trigger CI (unknown why); dispatch manually.
+- Workflow the user asked for: each feature on its own branch, merged to main
+  with --no-ff, pushed.
 
 ---
+
+## Earlier backlog (still open)
+
+- **GPU:** Nsight profiling (occupancy, bandwidth, latency-bound kernels,
+  screenshots into docs/); run the full Phase 1–2 suite on the GPU path;
+  colour self contacts per rod (self-collision costs ~11x throughput);
+  re-measure GPU headline numbers on a cool GPU (thermal drift seen: 1.16 B →
+  0.94 B within a session).
+- **Friction creep:** a cable resting on a bar creeps ~2 mm/s even at 2x the
+  needed friction (per-particle contact ratcheting). Try segment-based contact
+  or a static-friction anchor per contact; it biases hold/slip answers.
+- **Validation gaps:** timestep-refinement convergence study; tip-load and
+  twist-buckling mesh sweeps beyond n=32 (twist buckling converges at slope
+  0.82 — explain or improve); timestep envelope beyond one scenario
+  (contact-driven, whipping); capstan mu sweep; contact torque (rolling /
+  torsional friction); segment-based rod–primitive contact.
+- **CI:** find why pushes don't trigger workflows; bump actions to Node 24
+  versions (checkout@v5, setup-python@v6, upload-artifact@v5); consider a
+  shorter per-commit suite (twist buckling 9 min, capstan 3 min).
+- **Media:** re-render the long demo video (tools/make_video.py) with the fixed
+  solver, GPU numbers and repo link
+  (`--repo "https://github.com/ahmedsleem109/RopePhysics"`); host demo.mp4 as a
+  GitHub release asset.
+- **Optional:** Python binding.
+
+Detailed history of what was done (GPU bring-up, direct statics, frame bug,
+timestep envelope, GPU loads/contacts/self-collision, cable hanging) is in
+git log, README and docs/writeup.md.
+
+---
+
+## Completed items log (from earlier sessions)
 
 ## 1. Get the GPU running (blocks all of Phase 3 and half of Phase 4)
 
@@ -100,13 +160,13 @@ compile; they have never executed.
 - [x] Kinematic (moving) pinned particles on CPU and GPU, for grippers.
 - [ ] Friction creep (~2 mm/s on a draped cable even at 2× the needed friction).
       Investigate segment-based contact, or a static-friction anchor per contact.
-- [ ] Per-rod friction, so a friction sweep is one batch instead of one per value.
-- [ ] A manipulation demo that uses the moving gripper (cable routing around pegs).
+- [x] Per-rod friction (`Batch::setMaterialScales`).
+- [x] A manipulation demo that uses the moving gripper (harness routing, learned on the GPU).
 
 ## 6. Optional (plan: "if time allows")
 
 - [ ] Minimal Python / Warp-style binding.
-- [ ] Trivial policy-learning task (cable reaching a target).
+- [x] Policy-learning task (harness routing, `rodsim harness-learning`).
 
 ## 7. Launch and distribution (not engineering)
 

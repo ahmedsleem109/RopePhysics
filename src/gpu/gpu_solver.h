@@ -109,6 +109,12 @@ class Batch {
     // v[rod * particles + i]. Only pinned particles use them. This is how a
     // batch of grippers is driven without one upload per rod per step.
     void setKinematicVelocities(const std::vector<Vec3f>& rodMajor);
+    // Per-rod material randomization. youngsScale[r] multiplies rod r's
+    // stiffness (Young's modulus, and with it shear and torsion) relative to
+    // the prototype; frictionScale[r] multiplies every contact friction
+    // coefficient rod r sees. Either vector may be empty to leave it at 1.
+    void setMaterialScales(const std::vector<float>& youngsScale,
+                           const std::vector<float>& frictionScale);
 
     int numRods() const { return numRods_; }
     int numSegments() const { return numSegments_; }

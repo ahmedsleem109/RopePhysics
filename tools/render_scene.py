@@ -137,10 +137,14 @@ def capsule_segments(prim, pieces=24):
     return [(pts[i], pts[i + 1], prim["radius"]) for i in range(pieces)]
 
 
-def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None):
+def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None, decor=None):
+    """`decor`, if given, adds scene props (see HarnessDecor): a board drawn under
+    everything, colours per primitive, and extra capsules in the depth sort."""
     img = Image.new("RGB", (WIDTH * SUPERSAMPLE, HEIGHT * SUPERSAMPLE), BACKGROUND)
     draw = ImageDraw.Draw(img)
     draw_floor(draw, cam)
+    if decor is not None:
+        decor.draw_under(draw, cam)
 
     pos = traj.positions[frame]
     radius = traj.radius
@@ -160,12 +164,15 @@ def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None):
     items = []
     for prim in traj.meta.get("primitives", []):
         if prim["type"] == "capsule":
+            color = decor.primitive_color(prim) if decor is not None else PRIMITIVE
             for p0, p1, r in capsule_segments(prim):
-                items.append((p0, p1, r, "prim"))
+                items.append((p0, p1, r, color))
 
     for rod in pos:
         for i in range(len(rod) - 1):
             items.append((rod[i], rod[i + 1], radius, "rod"))
+    if decor is not None and mode == "shaded":
+        items.extend(decor.items(frame))
 
     p0s = np.array([it[0] for it in items])
     p1s = np.array([it[1] for it in items])
@@ -186,7 +193,7 @@ def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None):
         p0, p1, r, kind = items[k]
         fog = 0.45 * (depth[k] - znear) / (zfar - znear)
         if mode == "wire":
-            if kind == "prim":
+            if kind != "rod":
                 color = mix(PRIMITIVE, BACKGROUND, 0.35 + fog)
                 w = max(1, int(2 * r * cam.focal / depth[k]))
                 draw.line([(sx0[k], sy0[k]), (sx1[k], sy1[k])], fill=color, width=w)
@@ -195,7 +202,7 @@ def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None):
                           fill=mix(WIRE, BACKGROUND, fog), width=2 * SUPERSAMPLE)
             continue
 
-        base = PRIMITIVE if kind == "prim" else ACCENT
+        base = ACCENT if kind == "rod" else kind
         shade = 0.30 + 0.70 * float(diffuse[k])
         color = tuple(int(c * shade) for c in base)
         color = mix(color, BACKGROUND, fog)
@@ -244,6 +251,100 @@ def overlay(img, title=None, caption=None):
         draw.text((36, HEIGHT - 50), caption, font=font(19), fill=TEXT_DIM)
 
 
+# ----------------------------------------------------------------- harness
+
+BOARD = (44, 50, 60)
+BOARD_EDGE = (70, 78, 92)
+PEG = (86, 140, 214)
+CLIP = (92, 190, 128)
+CONNECTOR = (150, 156, 168)
+ARM = (214, 218, 224)
+ARM_JOINT = (70, 74, 82)
+
+
+class HarnessDecor:
+    """The wire-harness board and the robot holding the cable.
+
+    The arm is drawn, not simulated: its gripper follows the path the
+    simulation's gripper took (harness.gripper.csv), and the rest of the arm is
+    placed by two-link inverse kinematics in the vertical plane through its base
+    and the wrist.
+    """
+
+    BASE = np.array([0.35, 0.42, 0.0])
+    SHOULDER_HEIGHT = 0.32
+    UPPER, FORE = 0.85, 0.85
+    WRIST_LIFT = 0.16      # wrist joint above the cable end
+    FINGER_LENGTH = 0.05
+
+    def __init__(self, directory, name="harness", traj=None):
+        rows = np.loadtxt(os.path.join(directory, name + ".gripper.csv"), delimiter=",",
+                          skiprows=1, ndmin=2)
+        self.gripper = rows[:, 1:4]
+        self.traj = traj
+
+    def draw_under(self, draw, cam):
+        corners = [(-0.18, -1.32), (1.38, -1.32), (1.38, 0.62), (-0.18, 0.62)]
+        pts = np.array([(x, y, -0.001) for x, y in corners])
+        sx, sy, _ = cam.project(pts)
+        draw.polygon(list(zip(sx, sy)), fill=BOARD, outline=BOARD_EDGE, width=2 * SUPERSAMPLE)
+
+    def primitive_color(self, prim):
+        return PEG if prim["radius"] > 0.009 else CLIP
+
+    def arm_points(self, frame):
+        """Base, shoulder, elbow, wrist, gripper for one frame."""
+        g = self.gripper[min(frame, len(self.gripper) - 1)]
+        wrist = g + np.array([0.0, 0.0, self.WRIST_LIFT])
+        shoulder = self.BASE + np.array([0.0, 0.0, self.SHOULDER_HEIGHT])
+        d = wrist - shoulder
+        horizontal = np.array([d[0], d[1], 0.0])
+        h = np.linalg.norm(horizontal)
+        out = horizontal / max(h, 1e-9)
+        reach = min(np.linalg.norm(d), self.UPPER + self.FORE - 1e-6)
+        # Elbow up: angle at the shoulder between the wrist direction and the upper arm.
+        cos_a = (self.UPPER ** 2 + reach ** 2 - self.FORE ** 2) / (2 * self.UPPER * reach)
+        a = math.acos(float(np.clip(cos_a, -1, 1)))
+        pitch = math.atan2(d[2], h)
+        elbow = shoulder + self.UPPER * (math.cos(pitch + a) * out
+                                         + math.sin(pitch + a) * np.array([0, 0, 1.0]))
+        return self.BASE, shoulder, elbow, wrist, g
+
+    def items(self, frame):
+        base, shoulder, elbow, wrist, g = self.arm_points(frame)
+        pieces = []
+
+        def capsule(a, b, r, color, n=8):
+            pts = np.linspace(np.asarray(a, float), np.asarray(b, float), n + 1)
+            pieces.extend((pts[i], pts[i + 1], r, color) for i in range(n))
+
+        # The connector the cable is plugged into.
+        capsule((-0.055, 0, 0.016), (-0.012, 0, 0.016), 0.016, CONNECTOR, 3)
+
+        capsule(base, shoulder, 0.06, ARM_JOINT, 6)
+        capsule(shoulder - [0, 0, 0.015], shoulder + [0, 0, 0.015], 0.065, ARM_JOINT, 1)
+        capsule(shoulder, elbow, 0.04, ARM, 16)
+        capsule(elbow, elbow, 0.045, ARM_JOINT, 1)
+        capsule(elbow, wrist, 0.03, ARM, 16)
+        palm = wrist - np.array([0.0, 0.0, self.WRIST_LIFT - self.FINGER_LENGTH])
+        capsule(wrist, palm, 0.022, ARM_JOINT, 3)
+
+        # Fingers either side of the cable, across its last segment.
+        tangent = np.array([1.0, 0.0, 0.0])
+        if self.traj is not None:
+            rod = self.traj.positions[min(frame, len(self.traj) - 1), 0]
+            t = rod[-1] - rod[-3]
+            if np.linalg.norm(t[:2]) > 1e-6:
+                tangent = np.array([t[0], t[1], 0.0]) / np.linalg.norm(t[:2])
+        across = np.array([-tangent[1], tangent[0], 0.0])
+        capsule(palm - 0.025 * across, palm + 0.025 * across, 0.012, ARM_JOINT, 2)
+        for side in (-1, 1):
+            top = palm + side * 0.022 * across
+            tip = g + side * 0.011 * across + np.array([0, 0, 0.004])
+            capsule(top, tip, 0.006, ARM, 3)
+        return pieces
+
+
 # ----------------------------------------------------------------- presets
 
 def default_camera(name, frame=0, total=1):
@@ -253,6 +354,14 @@ def default_camera(name, frame=0, total=1):
         # A slow quarter orbit over the clip keeps a static field readable in 3D.
         angle = -2.2 + 0.5 * math.pi * frame / max(1, total)
         return orbit_camera((0.0, 0.0, 0.2), 5.0, 2.6, angle, fov=46)
+    if name == "harness-top":
+        return Camera((0.58, -0.02, 1.15), (0.58, -0.02, 0.0), fov_deg=45, up=(0, 1, 0))
+    if name == "harness":
+        # Close on the pegs and clip, where the routing happens.
+        return Camera((0.62, -0.95, 0.62), (0.58, -0.02, 0.04), fov_deg=42)
+    if name == "harness-wide":
+        # The whole reach, from picking the cable end up off the board edge.
+        return Camera((0.75, -2.3, 1.55), (0.5, -0.45, 0.1), fov_deg=42)
     if name == "cable-hanging":
         return Camera((0.0, -3.0, 1.0), (0.0, 0.0, 0.58), fov_deg=42)
     return Camera((2, -2, 1.5), (0, 0, 0.5))
@@ -281,8 +390,9 @@ def main():
 
     traj = Trajectory(args.dir, args.scene)
     cam = default_camera(args.scene, args.frame, len(traj))
+    decor = HarnessDecor(args.dir, args.scene, traj) if args.scene == "harness" else None
     img = render_frame(traj, args.frame, cam, args.mode, caption=timing_caption(traj),
-                       title=traj.meta["description"])
+                       title=traj.meta["description"], decor=decor)
     out = args.out or os.path.join(args.dir, f"{args.scene}_{args.mode}_{args.frame:04d}.png")
     img.save(out)
     print("wrote", out)

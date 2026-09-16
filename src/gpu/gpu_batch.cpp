@@ -261,6 +261,13 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
     im.state.force = static_cast<Vec3f*>(alloc(pCount * sizeof(Vec3f)));
     im.state.torque = static_cast<Vec3f*>(alloc(sCount * sizeof(Vec3f)));
     im.state.kinematicVelocity = static_cast<Vec3f*>(alloc(pCount * sizeof(Vec3f)));
+    im.state.complianceScale = static_cast<float*>(alloc(std::size_t(numRods) * sizeof(float)));
+    im.state.frictionScale = static_cast<float*>(alloc(std::size_t(numRods) * sizeof(float)));
+    if (im.state.complianceScale && im.state.frictionScale) {
+        const std::vector<float> ones(numRods, 1.0f);
+        copyToDevice(im.state.complianceScale, ones.data(), numRods * sizeof(float));
+        copyToDevice(im.state.frictionScale, ones.data(), numRods * sizeof(float));
+    }
     if (numPrims > 0) {
         im.state.contacts =
             static_cast<DevContactF*>(alloc(pCount * numPrims * sizeof(DevContactF)));
@@ -298,7 +305,7 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
         copyToDevice(im.state.selfOverflow, zeros.data(), rods * sizeof(int));
     }
     if (!im.state.x || !im.state.q || !im.state.force || !im.state.torque ||
-        !im.state.kinematicVelocity) {
+        !im.state.kinematicVelocity || !im.state.complianceScale || !im.state.frictionScale) {
         destroy();
         return false;
     }
@@ -421,6 +428,17 @@ void Batch::setKinematicVelocities(const std::vector<Vec3f>& rodMajor) {
             layout[particleAt(false, r, i, numParticles_, numRods_)] =
                 rodMajor[std::size_t(r) * numParticles_ + i];
     copyToDevice(impl_->state.kinematicVelocity, layout.data(), pCount * sizeof(Vec3f));
+}
+
+void Batch::setMaterialScales(const std::vector<float>& youngsScale,
+                              const std::vector<float>& frictionScale) {
+    if (youngsScale.size() == std::size_t(numRods_)) {
+        std::vector<float> compliance(numRods_);
+        for (int r = 0; r < numRods_; ++r) compliance[r] = 1.0f / youngsScale[r];
+        copyToDevice(impl_->state.complianceScale, compliance.data(), numRods_ * sizeof(float));
+    }
+    if (frictionScale.size() == std::size_t(numRods_))
+        copyToDevice(impl_->state.frictionScale, frictionScale.data(), numRods_ * sizeof(float));
 }
 
 void Batch::downloadPositions(std::vector<Vec3f>& out) const {
