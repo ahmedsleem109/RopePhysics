@@ -12,7 +12,14 @@
 
 namespace crs {
 
-using Real = double;  // the CPU reference scalar; device code uses TVec3<float>
+// The CPU reference scalar; device code uses TVec3<float>. CRS_REAL_FLOAT builds
+// the reference in single precision, which is how GPU-vs-CPU differences are
+// split into "float rounding" and "kernel bug".
+#ifdef CRS_REAL_FLOAT
+using Real = float;
+#else
+using Real = double;
+#endif
 
 constexpr Real kPi = Real(3.14159265358979323846);
 

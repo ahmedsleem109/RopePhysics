@@ -31,6 +31,8 @@ Rod makeBenchmarkRod(int segments) {
     return rod;
 }
 
+// Only the GPU cases compare trajectories and build batches.
+#ifdef CRS_WITH_CUDA
 double maxPositionDifference(const Rod& a, const Rod& b) {
     double worst = 0;
     for (std::size_t i = 0; i < a.state.numParticles(); ++i)
@@ -70,6 +72,8 @@ gpu::BatchParams toBatchParams(const SolverParams& p) {
     b.angularDamping = float(p.angularDamping);
     return b;
 }
+
+#endif  // CRS_WITH_CUDA
 
 }  // namespace
 
@@ -129,60 +133,86 @@ CaseResult runGpuParity(const std::string& outDir) {
     }
     res.notes.push_back("  device: " + gpu::deviceName());
 
+    // What "matches" can mean. The GPU runs single precision against a
+    // double-precision reference, and this trajectory (a gravity-released
+    // cantilever, one sweep per substep) amplifies rounding: the SAME colour-
+    // ordered CPU code built with float instead of double drifts from the
+    // double build by 5e-9 m after one step, 3e-7 m after ten and 2.5e-4 m
+    // after two hundred, at every mesh (measured with CRS_REAL_FLOAT). A single
+    // tolerance at step 200 cannot tell a kernel bug from that. So parity is
+    // checked at several horizons: tightly after one step, where rounding has
+    // had no time to grow and any kernel bug shows at full size, and against
+    // the measured float drift at step 200. The two strategies run the same
+    // kernel code in a different launch structure and must agree exactly.
     Csv csv(outDir, "gpu_parity.csv",
             "segments,steps,strategy,max_dx,max_dq,ordering_only_dx");
 
-    const int steps = 200;
-    double worst = 0;
+    const std::vector<int> checkpoints = {1, 10, 50, 200};
+    double worstFirst = 0, worstFinal = 0, strategyGap = 0;
     for (int n : {16, 48, 128}) {
         const Rod prototype = makeBenchmarkRod(n);
         const SolverParams p = benchmarkParams();
 
         const Coloring sc = colorStretchConstraints(prototype);
         const Coloring bc = colorBendConstraints(prototype);
-
-        // CPU in the GPU's order.
-        Rod cpuColored = prototype;
         SolverParams pc = p;
         pc.stretchColoring = &sc;
         pc.bendColoring = &bc;
-        for (int i = 0; i < steps; ++i) step(cpuColored, pc);
 
-        // CPU in index order, to size the ordering effect on its own.
-        Rod cpuSequential = prototype;
-        for (int i = 0; i < steps; ++i) step(cpuSequential, p);
-        const double orderingOnly = maxPositionDifference(cpuColored, cpuSequential);
+        // CPU in the GPU's order, and in index order to size the ordering effect.
+        Rod cpuColored = prototype, cpuSequential = prototype;
 
-        for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused}) {
-            gpu::Batch batch;
-            if (!batch.create(prototype, 1, strat)) {
-                res.notes.push_back(fmt("  n=%.0f does not fit the fused path", double(n)));
-                continue;
+        gpu::Batch multi, fused;
+        const bool haveMulti = multi.create(prototype, 1, gpu::Strategy::kMultiKernel);
+        const bool haveFused = fused.create(prototype, 1, gpu::Strategy::kFused);
+        if (!haveFused) res.notes.push_back(fmt("  n=%.0f does not fit the fused path", double(n)));
+        const gpu::BatchParams bp = toBatchParams(p);
+
+        int done = 0;
+        for (int cp : checkpoints) {
+            for (; done < cp; ++done) {
+                step(cpuColored, pc);
+                step(cpuSequential, p);
+                if (haveMulti) multi.step(bp);
+                if (haveFused) fused.step(bp);
             }
-            const gpu::BatchParams bp = toBatchParams(p);
-            for (int i = 0; i < steps; ++i) batch.step(bp);
-            batch.synchronize();
+            const double orderingOnly = maxPositionDifference(cpuColored, cpuSequential);
+            Rod fromMulti = prototype, fromFused = prototype;
+            if (haveMulti) {
+                multi.synchronize();
+                multi.download(0, fromMulti);
+            }
+            if (haveFused) {
+                fused.synchronize();
+                fused.download(0, fromFused);
+            }
+            if (haveMulti && haveFused)
+                strategyGap = std::max(strategyGap, maxPositionDifference(fromMulti, fromFused));
 
-            Rod fromGpu = prototype;
-            batch.download(0, fromGpu);
-            const double dx = maxPositionDifference(cpuColored, fromGpu);
-            const double dq = maxOrientationDifference(cpuColored, fromGpu);
-            worst = std::max(worst, dx);
-            csv.row(n, steps, strat == gpu::Strategy::kFused ? "fused" : "multikernel", dx, dq,
-                    orderingOnly);
+            for (int s = 0; s < 2; ++s) {
+                if (!(s == 0 ? haveMulti : haveFused)) continue;
+                const Rod& g = s == 0 ? fromMulti : fromFused;
+                const double dx = maxPositionDifference(cpuColored, g);
+                const double dq = maxOrientationDifference(cpuColored, g);
+                if (cp == checkpoints.front()) worstFirst = std::max(worstFirst, dx);
+                if (cp == checkpoints.back()) worstFinal = std::max(worstFinal, dx);
+                csv.row(n, cp, s == 0 ? "multikernel" : "fused", dx, dq, orderingOnly);
+            }
+            if (cp == checkpoints.back())
+                res.notes.push_back(fmt("  n=%.0f: colour ordering alone moves the CPU trajectory "
+                                        "by %.3g m over %.0f steps",
+                                        double(n), orderingOnly, double(cp)));
         }
-
-        res.notes.push_back(
-            fmt("  n=%.0f: colour ordering alone moves the CPU trajectory by %.3g m", double(n),
-                orderingOnly));
     }
 
-    // The tolerance is a float-precision statement, not a physics one: the GPU
-    // runs single precision against a double-precision reference, so 200 steps
-    // of accumulated rounding is what is actually being measured here.
-    res.notes.push_back(fmt("  worst GPU-CPU position difference %.3g m over %.0f steps", worst,
-                            double(steps)));
-    res.checks.push_back(makeCheck("GPU matches CPU (same colour order)", worst, 0.0, 1e-4, 1.0));
+    res.notes.push_back(fmt("  GPU-CPU position difference: %.3g m after 1 step, %.3g m after 200 "
+                            "(float-vs-double CPU alone: 5e-9 and 2.5e-4)",
+                            worstFirst, worstFinal));
+    res.checks.push_back(makeCheck("GPU matches CPU after one step", worstFirst, 0.0, 1e-7, 1.0));
+    res.checks.push_back(
+        makeCheck("GPU drift at 200 steps within float rounding", worstFinal, 0.0, 1e-3, 1.0));
+    res.checks.push_back(
+        makeCheck("multi-kernel and fused agree exactly", strategyGap, 0.0, 0.0, 1.0));
     return res;
 }
 
@@ -307,7 +337,7 @@ CaseResult runGpuThroughput(const std::string& outDir) {
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused})
             best = std::max(best, measure(strat, 2048, 64, sub));
 
-    res.notes.push_back(fmt("  peak %.4g million rod-segment-steps/sec", best / 1e6));
+    res.notes.push_back(fmt("  peak %.4g million segment-substeps/sec", best / 1e6));
     res.checks.push_back(makeCheck("throughput measured", best > 0 ? 1.0 : 0.0, 1.0, 0.0));
     return res;
 }
