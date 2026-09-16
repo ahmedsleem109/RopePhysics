@@ -458,7 +458,49 @@ No Nsight profile has been taken yet.
 
 ---
 
-## 6. How large a timestep is accurate
+## 6. Application: will a cable stay on a hook?
+
+A cable is draped over a horizontal bar and released. The grasp point sets
+the leg ratio long/short; friction and stiffness are not in the robot's hands.
+For an ideal flexible rope, the capstan equation over half a turn gives the answer:
+it holds while `long/short ≤ e^{μπ}`. `src/apps/cable_hanging.h` defines the task
+once, and it is used by the GPU sweep, its CPU cross-check and the demo scene.
+
+**Sweep.** 30 friction values × 60 leg ratios × two cables (E = 1 and 3 MPa),
+8 s each, takes 107 s on the laptop GPU. There is one batch per friction value,
+because friction belongs to the world a batch shares. The soft cable's boundary
+follows `μ = ln(ratio)/π` with a median offset of 0.033, always on the safe side:
+the closest point sits 0.021 below theory, and none is above it. The stiffer
+cable holds in 64% as many placements. Beyond a leg ratio of about 2.3 it holds
+at no friction up to 0.6: bending stiffness, which the formula ignores, dominates.
+
+![Cable hanging](figs/cable_hanging.png)
+
+**Two things went wrong on the way, and both are now checks.**
+
+*Single precision invented static friction.* The first sweep used 16 substeps
+and put the boundary 0.065 above theory, a suspiciously neat offset. The CPU,
+in double precision, said those cables slip. Built with `CRS_REAL_FLOAT`, the
+same CPU code said they hold. At 16 substeps gravity moves a particle g·h² =
+3.8e-8 m per substep, but a float coordinate near 0.8 m can only change in steps
+of 6e-8 m. The motion rounds away, velocity is recovered from rounded positions,
+and a resting cable can never start to slide. At 8 substeps × 2 sweeps (the
+same work) the margin is 2.6×, and float, double and theory agree. The case
+asserts the margin and cross-checks the GPU against the CPU on exactly those
+near-boundary placements.
+
+*Friction creeps.* A 3 s window then matched theory to 0.006, but only because it
+stopped watching. Rendering the demo caught it: μ = 0.25 on a 2:1 drape held at
+3 s and was on the floor by 4 s. Even at μ = 0.5 a draped cable creeps about
+2 mm/s, and μ = 0.28 held for 8 s and fell by 12 s. With an 8 s window the boundary
+sits 0.03 above theory. Hold/slip is therefore stated for that window, and the
+check requires the simulator never to be more optimistic than the ideal rope.
+The likely cause is per-particle contact: a rope over a bar rests on a few
+points, and which points touch keeps changing.
+
+---
+
+## 7. How large a timestep is accurate
 
 "XPBD is unconditionally stable" is true in the sense that it rarely explodes,
 and that is exactly why it is the wrong question. A rod can run for ever
@@ -512,7 +554,7 @@ covered.
 
 ---
 
-## 7. Throughput (CPU)
+## 8. Throughput (CPU)
 
 Batched independent rods, stepped across threads. The unit is segment-substeps
 per second, because a substep is the unit of solver work and counting frame steps
@@ -537,7 +579,7 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 
 ---
 
-## 8. Limitations
+## 9. Limitations
 
 This is the section that matters most, so it is specific.
 
@@ -545,7 +587,7 @@ This is the section that matters most, so it is specific.
   (§5) for every feature, but self-collision costs about 11× in throughput,
   and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
-- **The timestep envelope is one scenario deep** (§6): a gravity swing, 16–64
+- **The timestep envelope is one scenario deep** (§7): a gravity swing, 16–64
   segments. Contact-driven and whipping motion are not covered.
 - **The demo scenes were simulated before the material-frame fix** and should
   be re-run.
@@ -566,7 +608,7 @@ This is the section that matters most, so it is specific.
 - **Not attempted:** the optional Python binding and policy-learning task, and
   the distribution work in the plan, which is not engineering.
 
-## 9. What I would build next
+## 10. What I would build next
 
 Update the driver and run the three GPU cases — parity first, because a fused
 kernel that is fast and wrong is worth nothing. Then replace the relaxed static

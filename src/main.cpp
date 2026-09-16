@@ -41,6 +41,7 @@ const Entry kCases[] = {
     {"gpu-throughput", crs::runGpuThroughput},
     {"timestep-envelope", crs::runTimestepEnvelope},
     {"throughput", crs::runThroughput},
+    {"cable-hanging", crs::runCableHanging},
     {"crosscheck", crs::runCrossCheck},
 };
 

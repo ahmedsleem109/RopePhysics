@@ -93,6 +93,16 @@ compile; they have never executed.
 - [ ] Rod–primitive contact is per particle; add segment-based contact if
       segments must be longer than their diameter.
 
+## 5b. Applications
+
+- [x] Cable hanging: GPU sweep of friction × placement × stiffness, capstan
+      boundary on the safe side, CPU/GPU agreement, demo scene and video.
+- [x] Kinematic (moving) pinned particles on CPU and GPU, for grippers.
+- [ ] Friction creep (~2 mm/s on a draped cable even at 2× the needed friction).
+      Investigate segment-based contact, or a static-friction anchor per contact.
+- [ ] Per-rod friction, so a friction sweep is one batch instead of one per value.
+- [ ] A manipulation demo that uses the moving gripper (cable routing around pegs).
+
 ## 6. Optional (plan: "if time allows")
 
 - [ ] Minimal Python / Warp-style binding.
