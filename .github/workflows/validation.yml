@@ -1,0 +1,46 @@
+# Runs the whole validation suite on every push and pull request.
+#
+# CPU only: hosted runners have no GPU, so the three GPU cases report SKIP
+# (which does not count as a failure) and everything else must pass. rodsim's
+# exit status is the number of failed checks. No check depends on wall-clock
+# time, so a slow or shared runner changes how long this takes, not whether it
+# passes.
+name: validation
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Validation suite
+        run: |
+          mkdir -p ci-data
+          build/rodsim all --out ci-data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cross-check against the NumPy mirror
+        run: |
+          pip install numpy
+          python tools/reference_prototype.py ci-data/crosscheck.csv
+
+      - name: Upload validation data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-data
+          path: ci-data/
