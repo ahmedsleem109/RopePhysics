@@ -66,6 +66,9 @@ CaseResult runGpuThroughput(const std::string& outDir);    // scaling curves
 CaseResult runTimestepEnvelope(const std::string& outDir);  // largest accurate substep
 CaseResult runThroughput(const std::string& outDir);        // batched CPU segment-substeps/s
 
+// Applications: a real task swept on the GPU, checked against theory and the CPU.
+CaseResult runCableHanging(const std::string& outDir);  // will a cable stay on a hook?
+
 // Dumps a short, fully deterministic trajectory for tools/reference_prototype.py
 // to reproduce. Cross-implementation agreement on the solver map is a stronger
 // statement than either implementation agreeing with itself.

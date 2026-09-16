@@ -32,6 +32,37 @@ simulator's output (`rodsim scene drape|grid`, then
 
 ---
 
+## A real application: will this cable stay on the hook?
+
+A robot, or a person, drapes a cable over a hook and lets go. The robot controls
+**where it grasps the cable**, which sets how much hangs on each side. It does not
+control **friction** or **how stiff the cable is**. Will the cable stay?
+
+<img src="docs/media/cable-hanging.gif" alt="Six identical cables draped over six bars with increasing friction: the three low-friction ones slide off, the three high-friction ones hold">
+
+*Same cable, same 2:1 drape, six friction values. Rope theory (the capstan
+equation) says it needs μ ≥ 0.22: the left three slide off, the right three hold.*
+
+The GPU answers this for **3 600 placements at once**: 30 friction values × 60 grasp
+positions × 2 cables, each simulated for 8 seconds after release. That takes
+**under 2 minutes** on a laptop GPU.
+
+<img src="docs/figs/cable_hanging.png" alt="Hold/slide maps over friction and placement for a soft and a stiffer cable, with the ideal-rope boundary">
+
+- **The soft cable** (left) follows the textbook boundary (dashed line), slightly on
+  the safe side. The simulator never says "holds" where theory says "slips".
+- **The 3× stiffer cable** (right) is the reason to simulate. Hung more than about
+  **2.3 : 1 off-centre, it slides off no matter how grippy the hook is**. The
+  textbook formula cannot tell you that, because it ignores bending stiffness.
+
+The same pattern applies to robot cable handling, wire-harness assembly, hanging
+hoses and laundry: sweep the things you can't control, and learn which actions
+are safe before the robot tries them. The case runs as `rodsim cable-hanging`.
+It also checks the GPU against the double-precision CPU, including the placements
+where single precision once got the answer wrong (see *Lessons learned*).
+
+---
+
 ## What it can do
 
 - **Bend, twist, stretch and shear** with real material constants (Young's
@@ -41,7 +72,8 @@ simulator's output (`rodsim scene drape|grid`, then
   (sticking and sliding).
 - **Self-collision**, so a rope can coil into a pile without passing through
   itself.
-- **Clamped, pinned and twisted ends**, and applied forces and torques.
+- **Clamped, pinned, twisted and moving ends** (a gripper moving a cable), and
+  applied forces and torques.
 - **Batched GPU simulation**: thousands of rods stepped in parallel with every
   feature above (loads, driven ends, world contact, friction, self-collision),
   matching the CPU and bit-for-bit repeatable.
@@ -205,7 +237,7 @@ docs/                writeup, data (CSV), figures, README media
 ## Lessons learned
 
 <details>
-<summary><b>Seven ways this simulator produced plausible-looking wrong answers, and how each was caught</b></summary>
+<summary><b>Eight ways this simulator produced plausible-looking wrong answers, and how each was caught</b></summary>
 
 1. **The clamp must sit where the continuum clamp sits.** Freezing the first
    segment's frame clamps at `s = l/2`, silently turning second-order
@@ -225,6 +257,11 @@ docs/                writeup, data (CSV), figures, README media
 7. **Several tests passed without testing anything,** such as a self-collision
    test with zero contacts. Each test now also asserts that the thing it
    measures actually happened.
+8. **Single precision can invent friction.** On the GPU, a cable at rest could
+   only move in steps of about 6e-8 m, while gravity moved it 4e-8 m per substep.
+   The motion rounded away, so cables that slip in reality held on the GPU.
+   Comparing against a double-precision CPU run caught it. The fix is fewer,
+   larger substeps, and a check now asserts the margin.
 
 </details>
 
@@ -244,8 +281,13 @@ continuous integration.
 - **Self-collision is the expensive part on the GPU** (about 11× slower than a
   plain rod), because contact projection within one rod stays sequential to
   match the CPU exactly. There is no profiler study yet.
-- Contact with the world is per particle (fine while segments are no longer
-  than the rope's diameter), and contacts apply no torque to frames.
+- **Friction creeps.** A cable resting on a bar slowly slides, about 2 mm/s even
+  at twice the needed friction, so near the hold/slip boundary a cable can slide
+  off after several seconds. Hold/slip answers are therefore reported for a
+  stated time window (8 s) and err on the safe side. The likely cause is that
+  contact is per particle: a rope over a bar rests on a few points, which keep
+  changing.
+- Contacts apply no torque to frames.
 - The integrator dissipates energy slightly; this shrinks with more substeps.
 
 Background: the original plan with its phase gates is in

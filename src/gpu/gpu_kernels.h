@@ -107,6 +107,7 @@ struct DevStateF {
     // segment [N m] in WORLD axes, as on the CPU. Same layout as x and q.
     Vec3f* force = nullptr;
     Vec3f* torque = nullptr;
+    Vec3f* kinematicVelocity = nullptr;  // pinned particles move at this, as on the CPU
     // numPrims contact slots per particle, indexed particle-slot * numPrims + k.
     DevContactF* contacts = nullptr;
 

@@ -13,6 +13,7 @@ add_library(crs_core
   src/core/rod.cpp
   src/core/solver.cpp
   src/core/statics.cpp
+  src/apps/cable_hanging.cpp
 )
 target_include_directories(crs_core PUBLIC src)
 
@@ -22,6 +23,7 @@ add_executable(rodsim
   src/validation/contact_cases.cpp
   src/validation/scaling_cases.cpp
   src/validation/scenes.cpp
+  src/validation/application_cases.cpp
   src/gpu/gpu_cases.cpp
 )
 target_link_libraries(rodsim PRIVATE crs_core)

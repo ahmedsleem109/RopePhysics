@@ -31,14 +31,14 @@ T* uploadArray(const std::vector<T>& host, std::vector<void*>& owned) {
 }
 
 // Shared-memory footprint of one rod under the fused strategy: two quaternion
-// arrays per segment; position, previous position, velocity and force per
-// particle; angular velocity and torque per segment; one multiplier per
-// constraint; one contact slot per particle per primitive.
+// arrays per segment; position, previous position, velocity, force and
+// kinematic velocity per particle; angular velocity and torque per segment; one
+// multiplier per constraint; one contact slot per particle per primitive.
 std::size_t fusedSharedBytes(int numParticles, int numSegments, int numStretch, int numBend,
                              int numPrims = 0, int selfTableSize = -1, int selfCapacity = 0) {
     std::size_t bytes =
         2 * std::size_t(numSegments) * sizeof(Quatf) +
-        (4 * std::size_t(numParticles) + 2 * std::size_t(numSegments) + numStretch + numBend) *
+        (5 * std::size_t(numParticles) + 2 * std::size_t(numSegments) + numStretch + numBend) *
             sizeof(Vec3f) +
         std::size_t(numParticles) * numPrims * sizeof(DevContactF);
     if (selfTableSize >= 0)  // self-collision: per-segment scratch, table, pool
@@ -260,6 +260,7 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
     im.state.lamB = static_cast<Vec3f*>(alloc(std::size_t(nBend) * numRods * sizeof(Vec3f)));
     im.state.force = static_cast<Vec3f*>(alloc(pCount * sizeof(Vec3f)));
     im.state.torque = static_cast<Vec3f*>(alloc(sCount * sizeof(Vec3f)));
+    im.state.kinematicVelocity = static_cast<Vec3f*>(alloc(pCount * sizeof(Vec3f)));
     if (numPrims > 0) {
         im.state.contacts =
             static_cast<DevContactF*>(alloc(pCount * numPrims * sizeof(DevContactF)));
@@ -296,7 +297,8 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
         copyToDevice(im.state.selfLive, zeros.data(), rods * sizeof(int));
         copyToDevice(im.state.selfOverflow, zeros.data(), rods * sizeof(int));
     }
-    if (!im.state.x || !im.state.q || !im.state.force || !im.state.torque) {
+    if (!im.state.x || !im.state.q || !im.state.force || !im.state.torque ||
+        !im.state.kinematicVelocity) {
         destroy();
         return false;
     }
@@ -311,7 +313,8 @@ void Batch::upload(const Rod& in) {
     const std::size_t pCount = std::size_t(numParticles_) * numRods_;
     const std::size_t sCount = std::size_t(numSegments_) * numRods_;
 
-    std::vector<Vec3f> hx(pCount), hv(pCount), hforce(pCount), homega(sCount), htorque(sCount);
+    std::vector<Vec3f> hx(pCount), hv(pCount), hforce(pCount), hkin(pCount), homega(sCount),
+                       htorque(sCount);
     std::vector<Quatf> hq(sCount);
 
     for (int r = 0; r < numRods_; ++r) {
@@ -320,6 +323,7 @@ void Batch::upload(const Rod& in) {
             hx[at] = toF(in.state.x[i]);
             hv[at] = toF(in.state.v[i]);
             hforce[at] = toF(in.state.extForce[i]);
+            hkin[at] = toF(in.state.kinematicVelocity[i]);
         }
         for (int j = 0; j < numSegments_; ++j) {
             const std::size_t at = segmentAt(rodMajor, r, j, numSegments_, numRods_);
@@ -332,18 +336,40 @@ void Batch::upload(const Rod& in) {
     copyToDevice(im.state.x, hx.data(), pCount * sizeof(Vec3f));
     copyToDevice(im.state.v, hv.data(), pCount * sizeof(Vec3f));
     copyToDevice(im.state.force, hforce.data(), pCount * sizeof(Vec3f));
+    copyToDevice(im.state.kinematicVelocity, hkin.data(), pCount * sizeof(Vec3f));
     copyToDevice(im.state.q, hq.data(), sCount * sizeof(Quatf));
     copyToDevice(im.state.omega, homega.data(), sCount * sizeof(Vec3f));
     copyToDevice(im.state.torque, htorque.data(), sCount * sizeof(Vec3f));
+}
+
+void Batch::uploadRod(int rodIndex, const Rod& source) {
+    Impl& im = *impl_;
+    const bool rodMajor = strategy_ == Strategy::kFused;
+    for (int i = 0; i < numParticles_; ++i) {
+        const std::size_t at = particleAt(rodMajor, rodIndex, i, numParticles_, numRods_);
+        const Vec3f x = toF(source.state.x[i]), v = toF(source.state.v[i]);
+        copyToDevice(im.state.x + at, &x, sizeof(Vec3f));
+        copyToDevice(im.state.v + at, &v, sizeof(Vec3f));
+    }
+    for (int j = 0; j < numSegments_; ++j) {
+        const std::size_t at = segmentAt(rodMajor, rodIndex, j, numSegments_, numRods_);
+        const Quatf q = toF(source.state.q[j]);
+        const Vec3f w = toF(source.state.omega[j]);
+        copyToDevice(im.state.q + at, &q, sizeof(Quatf));
+        copyToDevice(im.state.omega + at, &w, sizeof(Vec3f));
+    }
+    setLoads(rodIndex, source);
 }
 
 void Batch::setLoads(int rodIndex, const Rod& source) {
     Impl& im = *impl_;
     const bool rodMajor = strategy_ == Strategy::kFused;
     for (int i = 0; i < numParticles_; ++i) {
+        const std::size_t at = particleAt(rodMajor, rodIndex, i, numParticles_, numRods_);
         const Vec3f f = toF(source.state.extForce[i]);
-        copyToDevice(im.state.force + particleAt(rodMajor, rodIndex, i, numParticles_, numRods_),
-                     &f, sizeof(Vec3f));
+        const Vec3f k = toF(source.state.kinematicVelocity[i]);
+        copyToDevice(im.state.force + at, &f, sizeof(Vec3f));
+        copyToDevice(im.state.kinematicVelocity + at, &k, sizeof(Vec3f));
     }
     for (int j = 0; j < numSegments_; ++j) {
         const std::size_t at = segmentAt(rodMajor, rodIndex, j, numSegments_, numRods_);
@@ -379,6 +405,34 @@ void Batch::download(int rodIndex, Rod& out) const {
         out.state.q[j] = toD(hq[at]);
         out.state.omega[j] = toD(homega[at]);
     }
+}
+
+void Batch::setKinematicVelocities(const std::vector<Vec3f>& rodMajor) {
+    const bool rodMajorLayout = strategy_ == Strategy::kFused;
+    const std::size_t pCount = std::size_t(numParticles_) * numRods_;
+    if (rodMajor.size() != pCount) return;
+    if (rodMajorLayout) {
+        copyToDevice(impl_->state.kinematicVelocity, rodMajor.data(), pCount * sizeof(Vec3f));
+        return;
+    }
+    std::vector<Vec3f> layout(pCount);
+    for (int r = 0; r < numRods_; ++r)
+        for (int i = 0; i < numParticles_; ++i)
+            layout[particleAt(false, r, i, numParticles_, numRods_)] =
+                rodMajor[std::size_t(r) * numParticles_ + i];
+    copyToDevice(impl_->state.kinematicVelocity, layout.data(), pCount * sizeof(Vec3f));
+}
+
+void Batch::downloadPositions(std::vector<Vec3f>& out) const {
+    const bool rodMajor = strategy_ == Strategy::kFused;
+    const std::size_t pCount = std::size_t(numParticles_) * numRods_;
+    std::vector<Vec3f> raw(pCount);
+    copyToHost(raw.data(), impl_->state.x, pCount * sizeof(Vec3f));
+    out.resize(pCount);
+    for (int r = 0; r < numRods_; ++r)
+        for (int i = 0; i < numParticles_; ++i)
+            out[std::size_t(r) * numParticles_ + i] =
+                raw[particleAt(rodMajor, r, i, numParticles_, numRods_)];
 }
 
 void Batch::step(const BatchParams& params) {

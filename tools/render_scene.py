@@ -218,13 +218,27 @@ def render_frame(traj, frame, cam, mode="shaded", caption=None, title=None):
                 draw.ellipse([x - d, y - d, x + d, y + d], fill=CONTACT)
 
     img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+    draw_labels(img, cam, traj.meta.get("labels", []))
     overlay(img, title=title, caption=caption)
     return img
+
+
+def draw_labels(img, cam, labels):
+    """Text anchored at world points, centred above them."""
+    draw = ImageDraw.Draw(img)
+    f = font(22, bold=True)
+    for label in labels:
+        sx, sy, z = cam.project(np.array([label["at"]]))
+        x, y = sx[0] / SUPERSAMPLE, sy[0] / SUPERSAMPLE
+        text = label["text"].replace("mu", "\u03bc")
+        w = draw.textlength(text, font=f)
+        draw.text((x - w / 2, y - 14), text, font=f, fill=TEXT)
 
 
 def overlay(img, title=None, caption=None):
     draw = ImageDraw.Draw(img)
     if title:
+        title = title.replace("mu >=", "μ ≥")
         draw.text((36, 28), title, font=font(26, bold=True), fill=TEXT)
     if caption:
         draw.text((36, HEIGHT - 50), caption, font=font(19), fill=TEXT_DIM)
@@ -239,6 +253,8 @@ def default_camera(name, frame=0, total=1):
         # A slow quarter orbit over the clip keeps a static field readable in 3D.
         angle = -2.2 + 0.5 * math.pi * frame / max(1, total)
         return orbit_camera((0.0, 0.0, 0.2), 5.0, 2.6, angle, fov=46)
+    if name == "cable-hanging":
+        return Camera((0.0, -3.0, 1.0), (0.0, 0.0, 0.58), fov_deg=42)
     return Camera((2, -2, 1.5), (0, 0, 0.5))
 
 
@@ -246,7 +262,10 @@ def timing_caption(traj):
     t = traj.meta["timing"]
     cost = t["wall_seconds"] / t["simulated_seconds"]
     threads = t.get("threads", 1)
-    where = f"CPU, {threads} thread{'s' if threads != 1 else ''}"
+    if t.get("device", "CPU") == "GPU":
+        where = "GPU"
+    else:
+        where = f"CPU, {threads} thread{'s' if threads != 1 else ''}"
     return (f"played back in real time  ·  simulating it cost {cost:.2f} s of wall clock per "
             f"simulated second ({where})")
 

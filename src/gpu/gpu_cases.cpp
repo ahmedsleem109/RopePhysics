@@ -147,8 +147,9 @@ CaseResult runGpuParity(const std::string& outDir) {
     //
     // Three scenarios. "gravity" is the benchmark rod swinging under its own
     // weight. "loaded" adds a force on the tip particle, a torque on the middle
-    // segment, and the root's fixed frame driven round the rod axis a little
-    // every step (which is how a twist is imposed), uploaded to the device
+    // segment, the pinned root particle moving at a prescribed velocity (how a
+    // gripper drives a rod), and the root's fixed frame driven round the rod
+    // axis a little every step (how a twist is imposed), uploaded to the device
     // through Batch::setLoads. "contact" lets the rod settle onto a floor 0.1 mm
     // below it and onto a sphere under its middle, both with friction; from
     // about step 5 it rests in 6-11 persistent contacts. (A first version
@@ -185,6 +186,7 @@ CaseResult runGpuParity(const std::string& outDir) {
             if (sc.loaded) {
                 prototype.state.extForce.back() = Vec3(0, Real(0.02), Real(0.05));
                 prototype.state.extTorque[n / 2] = Vec3(Real(2e-3), 0, Real(-1e-3));
+                prototype.state.kinematicVelocity[0] = Vec3(0, Real(0.05), Real(0.1));  // moving root
             }
             // Twist the root by 0.5 rad per second of simulated time.
             auto drive = [&](Rod& rod, int stepIndex) {
@@ -289,6 +291,7 @@ CaseResult runGpuParity(const std::string& outDir) {
         Rod plain = makeBenchmarkRod(16), loaded = makeBenchmarkRod(16);
         loaded.state.extForce.back() = Vec3(0, Real(0.02), Real(0.05));
         loaded.state.extTorque[8] = Vec3(Real(2e-3), 0, Real(-1e-3));
+        loaded.state.kinematicVelocity[0] = Vec3(0, Real(0.05), Real(0.1));
         step(plain, benchmarkParams());
         step(loaded, benchmarkParams());
         const double loadEffect = maxPositionDifference(plain, loaded);

@@ -409,6 +409,31 @@ def plot_timestep_envelope(data, figs):
     save(fig, figs, "timestep_envelope.png")
 
 
+# ----------------------------------------------------------------- applications
+
+def plot_cable_hanging(data, figs):
+    d = read(os.path.join(data, "cable_hanging.csv"))
+    stiffness = sorted(set(d["youngs"]))
+    fig, axes = new_fig(10.0, 4.0, len(stiffness))
+    for ax, E in zip(np.atleast_1d(axes), stiffness):
+        mus = sorted(set(m for m, e in zip(d["friction"], d["youngs"]) if e == E))
+        ratios = sorted(set(r for r, e in zip(d["leg_ratio"], d["youngs"]) if e == E))
+        grid = np.zeros((len(mus), len(ratios)))
+        for e, m, r, h in zip(d["youngs"], d["friction"], d["leg_ratio"], d["held"]):
+            if e == E:
+                grid[mus.index(m), ratios.index(r)] = h
+        ax.pcolormesh(ratios, mus, grid, cmap=matplotlib.colors.ListedColormap(
+            [T["series"][1], T["series"][2]]), shading="nearest", vmin=0, vmax=1)
+        rr = np.linspace(min(ratios), max(ratios), 200)
+        ax.plot(rr, np.log(rr) / math.pi, "--", color=T["text"], linewidth=1.8,
+                label=r"ideal rope: $\mu = \ln(\mathrm{long/short})/\pi$")
+        ax.set_ylim(min(mus), max(mus))
+        style(ax, f"E = {E / 1e6:.0f} MPa: green holds, orange slides off",
+              "placement: long leg / short leg", "friction coefficient $\mu$")
+        legend(ax)
+    save(fig, figs, "cable_hanging.png")
+
+
 PLOTS = {
     "solver_convergence.csv": plot_solver,
     "cantilever_convergence.csv": plot_cantilever,
@@ -421,6 +446,7 @@ PLOTS = {
     "incline.csv": plot_incline,
     "self_collision.csv": plot_self_collision,
     "throughput_cpu.csv": plot_throughput,
+    "cable_hanging.csv": plot_cable_hanging,
     "gpu_throughput.csv": plot_throughput_gpu,
     "timestep_envelope.csv": plot_timestep_envelope,
 }

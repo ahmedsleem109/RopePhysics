@@ -28,6 +28,7 @@ import render_scene as rs  # noqa: E402
 SCENES = {
     "drape": ("shaded", 0, 600, 4, 640),
     "grid": ("shaded", 0, 900, 9, 560),
+    "cable-hanging": ("shaded", 0, 360, 4, 800),
 }
 
 # Closer framings than the video's, since a README image is viewed small.
@@ -37,7 +38,7 @@ CAMERAS = {
 GIF_FPS = 15
 
 
-def render(name, scenes_dir, out_dir):
+def render(name, scenes_dir, out_dir, mp4=False):
     mode, first, last, every, width = SCENES[name]
     traj = rs.Trajectory(scenes_dir, name)
     last = min(last, len(traj))
@@ -47,7 +48,10 @@ def render(name, scenes_dir, out_dir):
     try:
         for k, f in enumerate(frames):
             cam = CAMERAS.get(name, lambda fr, tot: rs.default_camera(name, fr, tot))(f, len(traj))
-            rs.render_frame(traj, f, cam, mode).save(os.path.join(tmp, f"{k:05d}.png"))
+            title = traj.meta["description"] if mp4 else None
+            caption = rs.timing_caption(traj) if mp4 else None
+            rs.render_frame(traj, f, cam, mode, caption=caption, title=title).save(
+                os.path.join(tmp, f"{k:05d}.png"))
         ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
         out = os.path.join(out_dir, f"{name}.gif")
         scale = f"fps={GIF_FPS},scale={width}:-1:flags=lanczos"
@@ -58,6 +62,14 @@ def render(name, scenes_dir, out_dir):
              "-loop", "0", out],
             check=True)
         print(f"wrote {out} ({os.path.getsize(out) / 1e6:.1f} MB, {len(frames)} frames)")
+        if mp4:
+            video = os.path.join(out_dir, f"{name}.mp4")
+            subprocess.run(
+                [ffmpeg, "-y", "-loglevel", "error", "-framerate", str(GIF_FPS),
+                 "-i", os.path.join(tmp, "%05d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                 "-crf", "20", "-vf", "scale=1280:-2", video],
+                check=True)
+            print(f"wrote {video} ({os.path.getsize(video) / 1e6:.1f} MB)")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -67,10 +79,12 @@ def main():
     ap.add_argument("scenes", nargs="*", default=list(SCENES))
     ap.add_argument("--dir", default="out/scenes")
     ap.add_argument("--out", default="docs/media")
+    ap.add_argument("--mp4", action="store_true",
+                    help="also write a titled, captioned MP4 next to the GIF")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     for name in args.scenes:
-        render(name, args.dir, args.out)
+        render(name, args.dir, args.out, args.mp4)
 
 
 if __name__ == "__main__":

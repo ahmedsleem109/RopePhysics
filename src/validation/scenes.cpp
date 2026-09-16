@@ -32,6 +32,8 @@
 #include <vector>
 
 #include "../core/collision.h"
+#include "../apps/cable_hanging.h"
+#include "../core/coloring.h"
 #include "../core/solver.h"
 #include "support.h"
 
@@ -53,6 +55,17 @@ class TrajectoryWriter {
     }
 
     bool ok() const { return bool(out_); }
+
+    // Positions already flattened rod-major, as a GPU batch downloads them.
+    void frame(float wallSeconds, const std::vector<Vec3f>& positions) {
+        writeF(wallSeconds);
+        for (const Vec3f& x : positions) {
+            writeF(x.x);
+            writeF(x.y);
+            writeF(x.z);
+        }
+        writeI(0);
+    }
 
     void frame(float wallSeconds, const std::vector<const Rod*>& rods,
                const std::vector<Vec3>& contacts) {
@@ -103,11 +116,18 @@ struct SceneTotals {
     double simSeconds = 0;
     double segmentSubsteps = 0;
     int threads = 1;
+    const char* device = "CPU";
+};
+
+struct SceneLabel {
+    std::string text;
+    Vec3 at;
 };
 
 void writeJson(const std::string& path, const char* name, const char* description,
                const CollisionWorld& world, float radius, float fps, int frames, int rods,
-               int particles, const SceneTotals& t, const SolverParams& p, int stepsPerFrame) {
+               int particles, const SceneTotals& t, const SolverParams& p, int stepsPerFrame,
+               const std::vector<SceneLabel>& labels = {}) {
     std::FILE* f = std::fopen(path.c_str(), "w");
     if (!f) return;
     std::fprintf(f, "{\n  \"name\": \"%s\",\n  \"description\": \"%s\",\n", name, description);
@@ -121,9 +141,15 @@ void writeJson(const std::string& path, const char* name, const char* descriptio
     std::fprintf(f,
                  "  \"timing\": {\"simulated_seconds\": %g, \"wall_seconds\": %g, "
                  "\"realtime_factor\": %g, \"segment_substeps\": %g, "
-                 "\"segment_substeps_per_sec\": %g, \"threads\": %d, \"device\": \"CPU\"},\n",
+                 "\"segment_substeps_per_sec\": %g, \"threads\": %d, \"device\": \"%s\"},\n",
                  t.simSeconds, t.wallSeconds, t.simSeconds / t.wallSeconds, t.segmentSubsteps,
-                 t.segmentSubsteps / t.wallSeconds, t.threads);
+                 t.segmentSubsteps / t.wallSeconds, t.threads, t.device);
+    std::fprintf(f, "  \"labels\": [\n");
+    for (std::size_t i = 0; i < labels.size(); ++i)
+        std::fprintf(f, "    {\"text\": \"%s\", \"at\": [%g, %g, %g]}%s\n", labels[i].text.c_str(),
+                     double(labels[i].at.x), double(labels[i].at.y), double(labels[i].at.z),
+                     i + 1 == labels.size() ? "" : ",");
+    std::fprintf(f, "  ],\n");
     std::fprintf(f, "  \"primitives\": [\n");
     for (std::size_t i = 0; i < world.primitives.size(); ++i)
         writePrimitiveJson(f, world.primitives[i], i + 1 == world.primitives.size());
@@ -327,12 +353,83 @@ int sceneGrid(const std::string& outDir) {
     return 0;
 }
 
+
+// ---------------------------------------------------------------- cable-hanging
+//
+// The application in one picture: six identical cables, each draped over a bar
+// with the same 2:1 placement and released, on six bars that differ only in
+// friction. The capstan equation says a 2:1 drape needs mu >= ln 2 / pi = 0.22,
+// so the three on the left should slide off and the three on the right hold.
+// The frictions stay clear of the boundary on both sides: close above it this
+// solver's friction creeps, and a cable theory says holds can slide off after
+// a few seconds (see apps::HangingCable::duration).
+// Simulated with the task definition the GPU sweep uses (apps::HangingCable),
+// here on the CPU because each bar has its own friction.
+int sceneCableHanging(const std::string& outDir) {
+    const apps::HangingCable task;
+    const Real ratio = Real(2.0);
+    const Real youngs = Real(1e6);
+    const std::vector<Real> frictions = {Real(0.08), Real(0.15), Real(0.20),
+                                         Real(0.32), Real(0.40), Real(0.50)};
+    const Real spacing = Real(0.55);
+
+    const float fps = 60;
+    const int frames = 360;  // 6 s: release, then either slide off or settle
+    SolverParams p = task.params();
+    const int stepsPerFrame = int(std::lround(1.0 / (fps * double(p.dt))));
+    p.dt = Real(1.0 / (fps * stepsPerFrame));
+
+    std::vector<Rod> rods;
+    std::vector<CollisionWorld> worlds;
+    std::vector<SolverContext> contexts(frictions.size());
+    CollisionWorld display;  // every bar, for the renderer
+    std::vector<SceneLabel> labels;
+    for (std::size_t k = 0; k < frictions.size(); ++k) {
+        const Vec3 at(spacing * (Real(k) - Real(frictions.size() - 1) / 2), 0, 0);
+        rods.push_back(task.build(ratio, youngs, at));
+        CollisionWorld w = task.world(frictions[k], at);
+        worlds.push_back(w);
+        display.primitives.push_back(w.primitives.front());
+        char text[64];
+        std::snprintf(text, sizeof(text), "mu = %.2f", double(frictions[k]));
+        labels.push_back({text, at + Vec3(0, 0, task.barHeight + Real(0.16))});
+    }
+    display.primitives.push_back(Primitive::makePlane(Vec3(0, 0, 0), Vec3(0, 0, 1), Real(0.5)));
+
+    std::vector<const Rod*> views;
+    for (const Rod& r : rods) views.push_back(&r);
+    TrajectoryWriter traj(outDir + "/cable-hanging.rodtraj", frames, int(rods.size()),
+                          task.segments + 1, float(task.material().radius), fps);
+    if (!traj.ok()) return 1;
+
+    SceneTotals totals;
+    for (int f = 0; f < frames; ++f) {
+        const auto t0 = Clock::now();
+        for (std::size_t k = 0; k < rods.size(); ++k)
+            for (int s = 0; s < stepsPerFrame; ++s) step(rods[k], p, worlds[k], contexts[k]);
+        const double wall = std::chrono::duration<double>(Clock::now() - t0).count();
+        totals.wallSeconds += wall;
+        totals.simSeconds += double(p.dt) * stepsPerFrame;
+        totals.segmentSubsteps += double(rods.size()) * task.segments * stepsPerFrame * p.substeps;
+        traj.frame(float(wall), views, {});
+    }
+
+    writeJson(outDir + "/cable-hanging.json", "cable-hanging",
+              "Will the cable stay on the hook? Same cable, same 2:1 drape. Theory: needs mu >= 0.22",
+              display, float(task.material().radius), fps, frames, int(rods.size()),
+              task.segments + 1, totals, p, stepsPerFrame, labels);
+    std::printf("cable-hanging: %zu cables x %d frames, %.2f s simulated in %.2f s wall\n",
+                rods.size(), frames, totals.simSeconds, totals.wallSeconds);
+    return 0;
+}
+
 }  // namespace
 
 int runScene(const std::string& name, const std::string& outDir) {
     if (name == "drape") return sceneDrape(outDir);
     if (name == "grid") return sceneGrid(outDir);
-    std::printf("unknown scene '%s' (drape|grid)\n", name.c_str());
+    if (name == "cable-hanging") return sceneCableHanging(outDir);
+    std::printf("unknown scene '%s' (drape|grid|cable-hanging)\n", name.c_str());
     return 2;
 }
 

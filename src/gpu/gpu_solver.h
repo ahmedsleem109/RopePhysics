@@ -90,14 +90,25 @@ class Batch {
     // Copy one environment's state back into a host rod, which must have the
     // same topology as the prototype.
     void download(int rodIndex, Rod& out) const;
+    // Every rod's particle positions in one transfer, rod-major:
+    // out[rod * particles + i]. For recording scenes, where one download per rod
+    // per frame would copy the whole batch once per rod.
+    void downloadPositions(std::vector<Vec3f>& out) const;
     // Re-upload every environment from a host rod (all environments identical),
     // including its applied loads.
     void upload(const Rod& in);
     // Set one environment's applied loads from a host rod with the same
-    // topology: extForce per particle, extTorque per segment, and the
-    // orientation of every fixed frame (zero inertia). Updating a fixed frame's
+    // topology: extForce and kinematicVelocity per particle, extTorque per
+    // segment, and the orientation of every fixed frame (zero inertia). Updating a fixed frame's
     // orientation between steps is how an end is driven, e.g. twisted.
     void setLoads(int rodIndex, const Rod& source);
+    // Set one environment's full state (positions, velocities, orientations,
+    // angular velocities, loads) from a host rod with the prototype's topology.
+    void uploadRod(int rodIndex, const Rod& source);
+    // Every rod's kinematic velocities in one transfer, rod-major:
+    // v[rod * particles + i]. Only pinned particles use them. This is how a
+    // batch of grippers is driven without one upload per rod per step.
+    void setKinematicVelocities(const std::vector<Vec3f>& rodMajor);
 
     int numRods() const { return numRods_; }
     int numSegments() const { return numSegments_; }
