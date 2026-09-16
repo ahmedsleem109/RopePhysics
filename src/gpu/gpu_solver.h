@@ -71,10 +71,15 @@ class Batch {
     Batch& operator=(const Batch&) = delete;
 
     // Replicate `prototype` across `numRods` environments, optionally colliding
-    // with the static primitives of `world`. Returns false if the batch cannot
-    // run: for kFused, if a rod's state and contacts do not fit in shared
-    // memory; for any strategy, if `world` asks for self-collision, which the
-    // GPU path does not support yet.
+    // with `world`: its static primitives and, if enabled, self-collision.
+    // Returns false if the batch cannot run: for kFused, if a rod's state and
+    // world contacts do not fit in shared memory.
+    //
+    // Self-collision keeps a spatial-hash table of world.hashTableSize + 1 ints
+    // per rod and a pool of max(16, segments / 2) contacts per rod; contacts
+    // beyond that are dropped and counted (see selfContactOverflow()). Under kFused all of it
+    // lives in the block's shared memory, so use a small table there: the CPU
+    // default of 4096 alone is a third of an RTX 3060 block.
     bool create(const Rod& prototype, int numRods, Strategy strategy,
                 const CollisionWorld* world = nullptr);
     void destroy();
@@ -103,6 +108,9 @@ class Batch {
     // Kernel launches issued per step, the number the fused path is trying to
     // drive to one.
     int launchesPerStep(const BatchParams& params) const;
+    // Self contacts that did not fit the per-rod capacity, summed over rods and
+    // steps. Anything nonzero means the batch is no longer the CPU's solver.
+    long long selfContactOverflow() const;
 
    private:
     struct Impl;
@@ -112,6 +120,7 @@ class Batch {
     int numSegments_ = 0;
     int numParticles_ = 0;
     int numPrims_ = 0;
+    bool selfCollision_ = false;
     Strategy strategy_ = Strategy::kMultiKernel;
     Coloring stretchColoring_;
     Coloring bendColoring_;

@@ -308,6 +308,131 @@ CaseResult runGpuParity(const std::string& outDir) {
                             contactEffect, contactErrorAt50));
     res.checks.push_back(makeRangeCheck("GPU contact error under 1% of the contact effect",
                                         contactErrorAt50 / contactEffect, 0.0, 0.01));
+
+    // ---- self-collision -------------------------------------------------------
+    //
+    // A rope dropped end-first onto the floor coils onto itself. Coiling is
+    // chaotic, so a long trajectory cannot be compared to float precision; a
+    // restart can. The rope is simulated on the CPU, in the GPU's colour order,
+    // until it holds at least five self contacts. That state is uploaded to both
+    // GPU strategies and all three take ONE step.
+    //
+    // One step here is 16 substeps x 4 sweeps of non-smooth contact, and float
+    // rounding is correspondingly larger than in the benchmark: the same CPU
+    // code built with CRS_REAL_FLOAT, stepped once from the identical state,
+    // lands 1.8e-5 m from the double build (and even finds 6 self contacts at
+    // the last substep instead of 8). The tolerance is 5e-5 m, about three times
+    // that. For the check to mean anything, self-collision itself must change the
+    // step by much more than the tolerance; that is asserted too, by stepping the
+    // same state on the CPU without self-collision.
+    {
+        RodMaterial mat = referenceMaterial();
+        mat.youngs = Real(2e6);
+        // The configuration of the CPU self-collision case, which coils reliably.
+        // Segments are shorter than the diameter, so the index gap is 3 and only
+        // genuine coiling contacts count. (With segments barely longer than the
+        // diameter, strands two apart start AT the contact threshold, where float
+        // and double disagree about whether a contact exists at all.)
+        const int n = 150;
+        const Real L = Real(1.2);
+        Rod rope = makeStraightRod(n, L, mat, Vec3(0, 0, Real(0.02)),
+                                   normalize(Vec3(Real(0.08), Real(0.03), 1)));
+        for (Vec3& x : rope.state.x) x.z = L + Real(0.05) - x.z;
+        rope.state.xPrev = rope.state.x;
+        setRestFromCurrent(rope);
+
+        CollisionWorld selfWorld;
+        selfWorld.primitives.push_back(
+            Primitive::makePlane(Vec3(0, 0, 0), Vec3(0, 0, 1), Real(0.6)));
+        selfWorld.selfCollision = true;
+        selfWorld.selfFriction = Real(0.3);
+        selfWorld.hashTableSize = 256;
+        CollisionWorld noSelf = selfWorld;
+        noSelf.selfCollision = false;
+
+        SolverParams sp;
+        sp.dt = Real(1e-3);
+        sp.substeps = 16;
+        sp.iterations = 4;
+        sp.gravity = Vec3(0, 0, Real(-9.81));
+        sp.linearDamping = sp.angularDamping = Real(1);
+        const Coloring ropeStretch = colorStretchConstraints(rope);
+        const Coloring ropeBend = colorBendConstraints(rope);
+        sp.stretchColoring = &ropeStretch;
+        sp.bendColoring = &ropeBend;
+
+        auto selfContactsIn = [](const SolverContext& c) {
+            int k = 0;
+            for (const Contact& ct : c.contacts.contacts) k += ct.count == 4 ? 1 : 0;
+            return k;
+        };
+        SolverContext ctx;
+        int presteps = 0;
+        while (presteps < 3000 && selfContactsIn(ctx) < 5) {
+            step(rope, sp, selfWorld, ctx);
+            ++presteps;
+        }
+        const int selfAtRestart = selfContactsIn(ctx);
+
+        Rod cpuWith = rope, cpuWithout = rope;
+        SolverContext ctxWith, ctxWithout;
+        step(cpuWith, sp, selfWorld, ctxWith);
+        step(cpuWithout, sp, noSelf, ctxWithout);
+        const double selfEffect = maxPositionDifference(cpuWith, cpuWithout);
+
+        const gpu::BatchParams sbp = toBatchParams(sp);
+        double selfError = 0, selfStrategyGap = 0, drift50 = 0;
+        long long overflow = 0;
+        Rod fromMulti = rope, fromFused = rope;
+        gpu::Batch multi, fused;
+        const bool haveMulti = multi.create(rope, 1, gpu::Strategy::kMultiKernel, &selfWorld);
+        const bool haveFused = fused.create(rope, 1, gpu::Strategy::kFused, &selfWorld);
+        if (haveMulti) {
+            multi.step(sbp);
+            multi.synchronize();
+            multi.download(0, fromMulti);
+            selfError = std::max(selfError, maxPositionDifference(cpuWith, fromMulti));
+        }
+        if (haveFused) {
+            fused.step(sbp);
+            fused.synchronize();
+            fused.download(0, fromFused);
+            selfError = std::max(selfError, maxPositionDifference(cpuWith, fromFused));
+        }
+        if (haveMulti && haveFused) selfStrategyGap = maxPositionDifference(fromMulti, fromFused);
+
+        // Then 50 more steps, reported only: coiling amplifies rounding.
+        if (haveFused) {
+            Rod cpu = cpuWith;
+            SolverContext c2 = ctxWith;
+            for (int i = 0; i < 50; ++i) {
+                step(cpu, sp, selfWorld, c2);
+                fused.step(sbp);
+            }
+            fused.synchronize();
+            fused.download(0, fromFused);
+            drift50 = maxPositionDifference(cpu, fromFused);
+            overflow += fused.selfContactOverflow();
+        }
+        if (haveMulti) overflow += multi.selfContactOverflow();
+
+        res.notes.push_back(fmt("  self-collision: restart after %.0f steps with %.0f self contacts; "
+                                "one step of self-collision moves the rope %.3g m",
+                                double(presteps), double(selfAtRestart), selfEffect));
+        res.notes.push_back(fmt("  self-collision: GPU-CPU %.3g m after one step, %.3g m 50 steps "
+                                "later", selfError, drift50));
+        res.checks.push_back(makeRangeCheck("self-collision restart made contact",
+                                            double(selfAtRestart), 5.0, 1e9));
+        const double selfTol = 5e-5;
+        res.checks.push_back(makeCheck("self-collision: GPU matches CPU after one step", selfError,
+                                       0.0, selfTol, 1.0));
+        res.checks.push_back(makeRangeCheck("self-collision effect is 10x the tolerance",
+                                            selfEffect / selfTol, 10.0, 1e12));
+        res.checks.push_back(makeCheck("self-collision: strategies agree exactly", selfStrategyGap,
+                                       0.0, 0.0, 1.0));
+        res.checks.push_back(
+            makeCheck("self-collision: no contact overflow", double(overflow), 0.0, 0.0, 1.0));
+    }
     return res;
 }
 
@@ -390,7 +515,7 @@ CaseResult runGpuThroughput(const std::string& outDir) {
 
     Csv csv(outDir, "gpu_throughput.csv",
             "strategy,rods,segments,substeps,steps,seconds,segment_steps_per_sec,launches_per_step,"
-            "primitives");
+            "primitives,self_collision");
 
     // The contact workload: a floor and a sphere under every rod, so every
     // particle tests two primitives each substep and projects its contacts
@@ -401,11 +526,19 @@ CaseResult runGpuThroughput(const std::string& outDir) {
     world.primitives.push_back(Primitive::makeSphere(Vec3(Real(0.5), 0, Real(-0.0851)),
                                                      Real(0.08), Real(0.3)));
 
+    CollisionWorld selfWorld = world;
+    selfWorld.selfCollision = true;
+    selfWorld.selfFriction = Real(0.3);
+    selfWorld.hashTableSize = 256;
+
+    enum class Load { kNone, kContacts, kSelf };
     auto measure = [&](gpu::Strategy strat, int rods, int n, int substeps,
-                       bool contacts = false) -> double {
+                       Load load = Load::kNone) -> double {
         const Rod prototype = makeBenchmarkRod(n);
         gpu::Batch batch;
-        if (!batch.create(prototype, rods, strat, contacts ? &world : nullptr)) return 0;
+        const CollisionWorld* w =
+            load == Load::kNone ? nullptr : (load == Load::kSelf ? &selfWorld : &world);
+        if (!batch.create(prototype, rods, strat, w)) return 0;
 
         gpu::BatchParams bp = toBatchParams(benchmarkParams());
         bp.substeps = substeps;
@@ -424,7 +557,8 @@ CaseResult runGpuThroughput(const std::string& outDir) {
         const double segmentSteps = double(rods) * n * steps * substeps;
         const double rate = segmentSteps / seconds;
         csv.row(strat == gpu::Strategy::kFused ? "fused" : "multikernel", rods, n, substeps, steps,
-                seconds, rate, batch.launchesPerStep(bp), contacts ? 2 : 0);
+                seconds, rate, batch.launchesPerStep(bp), load == Load::kNone ? 0 : 2,
+                load == Load::kSelf ? 1 : 0);
         return rate;
     };
 
@@ -439,17 +573,21 @@ CaseResult runGpuThroughput(const std::string& outDir) {
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused})
             best = std::max(best, measure(strat, 2048, n, 8));
     // With contacts against two primitives, at the batch-size knee and beyond.
-    double contactRate = 0, plainRate = 0;
+    double contactRate = 0, plainRate = 0, selfRate = 0;
     for (int rods : {1024, 16384})
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused}) {
-            const double r = measure(strat, rods, 64, 8, true);
+            const double r = measure(strat, rods, 64, 8, Load::kContacts);
             if (rods == 16384 && strat == gpu::Strategy::kFused) contactRate = r;
+            const double rs = measure(strat, rods, 64, 8, Load::kSelf);
+            if (rods == 16384 && strat == gpu::Strategy::kFused) selfRate = rs;
         }
     plainRate = measure(gpu::Strategy::kFused, 16384, 64, 8);
     res.notes.push_back(fmt("  contacts against 2 primitives cost %.3gx throughput (fused, "
                             "16384 x 64): %.4g M vs %.4g M segment-substeps/s",
                             plainRate > 0 ? contactRate / plainRate : 0.0, contactRate / 1e6,
                             plainRate / 1e6));
+    res.notes.push_back(fmt("  adding self-collision: %.4g M segment-substeps/s (%.3gx of plain)",
+                            selfRate / 1e6, plainRate > 0 ? selfRate / plainRate : 0.0));
     // Substep sweep.
     for (int sub : {1, 2, 4, 8, 16, 32})
         for (gpu::Strategy strat : {gpu::Strategy::kMultiKernel, gpu::Strategy::kFused})

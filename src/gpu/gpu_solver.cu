@@ -170,6 +170,198 @@ __device__ void projectParticleContacts(const DevRodF& d, const View& view, int 
     }
 }
 
+// ---- self-collision ----------------------------------------------------------
+//
+// A self contact couples four particles, so contacts conflict and cannot be
+// projected in parallel within a rod without changing the iteration away from
+// the CPU's (colouring them per substep, or averaging Jacobi-style, both do).
+// What IS parallel is finding them:
+//
+//   1. hash build (centres, counting sort) -- O(segments + table), thread 0;
+//   2. count -- one thread per segment j counts j's contacts with later
+//      segments;
+//   3. prefix sum -- thread 0 turns counts into offsets into the rod's pool;
+//   4. fill -- one thread per segment writes its contacts at its own offset;
+//   5. project -- the pool in order, which is exactly the order the CPU builds
+//      its list in (segments ascending; for each, the 3x3x3 query in z/y/x
+//      order with items ascending within a cell, bucket collisions and all).
+//      Sequential, but only over live contacts: tens per rod.
+//
+// Two earlier versions, both measured: all of it on thread 0 cut throughput
+// 50x, because a fused block is as slow as its slowest thread; and fixed slots
+// per segment either overflowed (a segment can own 5 contacts in the coiling
+// case) or did not fit a block's shared memory. The pool holds numStretch / 2
+// contacts per rod, against a measured peak of 37 for 150 segments; beyond it
+// contacts are counted as overflow, never silently dropped.
+
+// One rod's self-collision working memory: global memory at the rod's offset
+// on the multi-kernel path, the block's shared memory on the fused path.
+struct SelfScratch {
+    Vec3f* centres;          // per segment
+    int* cellOf;             // per segment
+    int* sorted;             // per segment
+    int* segCount;           // per segment: contacts found
+    int* segStart;           // per segment: offset into the pool
+    int* cellStart;          // hashTableSize + 1
+    DevSelfContactF* pool;   // selfCapacity
+    float* cellSize;         // one
+    int* live;               // one: contacts stored in the pool
+    int* overflow;           // one, cumulative
+};
+
+__device__ SelfScratch globalSelfScratch(const DevRodF& d, const DevStateF& g, int r) {
+    SelfScratch s;
+    s.centres = g.selfCentres + r * d.numStretch;
+    s.cellOf = g.selfCellOf + r * d.numStretch;
+    s.sorted = g.selfSorted + r * d.numStretch;
+    s.segCount = g.selfSegCount + r * d.numStretch;
+    s.segStart = g.selfSegStart + r * d.numStretch;
+    s.cellStart = g.selfCellStart + r * (d.hashTableSize + 1);
+    s.pool = g.selfPool + r * d.selfCapacity;
+    s.cellSize = g.selfCellSize + r;
+    s.live = g.selfLive + r;
+    s.overflow = g.selfOverflow + r;
+    return s;
+}
+
+__device__ void buildSelfHash(const DevRodF& d, const SelfScratch& sc, const View& view) {
+    const int nSeg = d.numStretch;
+    float maxSegLen = 0.0f;
+    for (int j = 0; j < nSeg; ++j) {
+        const Vec3f a = view.x[view.P(d.sP0[j])], b = view.x[view.P(d.sP1[j])];
+        sc.centres[j] = (a + b) * 0.5f;
+        const float len = norm(b - a);
+        if (len > maxSegLen) maxSegLen = len;
+    }
+    // A 3x3x3 neighbourhood reaches one cell width: half of each segment plus
+    // the two radii.
+    const float cell = maxSegLen + 2.0f * d.radius;
+    *sc.cellSize = cell;
+
+    // Counting sort into buckets (the prefix sum of SpatialHash::build), filling
+    // through cellStart and shifting it back instead of keeping a cursor array.
+    for (int t = 0; t <= d.hashTableSize; ++t) sc.cellStart[t] = 0;
+    for (int j = 0; j < nSeg; ++j) {
+        const Vec3f c = sc.centres[j];
+        sc.cellOf[j] = int(hashCell(cellCoord(c.x, cell), cellCoord(c.y, cell),
+                                    cellCoord(c.z, cell), d.hashTableSize));
+        ++sc.cellStart[sc.cellOf[j] + 1];
+    }
+    for (int t = 0; t < d.hashTableSize; ++t) sc.cellStart[t + 1] += sc.cellStart[t];
+    for (int j = 0; j < nSeg; ++j) sc.sorted[sc.cellStart[sc.cellOf[j]]++] = j;
+    for (int t = d.hashTableSize; t > 0; --t) sc.cellStart[t] = sc.cellStart[t - 1];
+    sc.cellStart[0] = 0;
+}
+
+// Contacts of segment j with later segments, in the CPU's candidate order.
+// With `fill` false this only counts them; with `fill` true it writes them at
+// j's pool offset, stopping at the pool's end.
+__device__ void querySelfSegment(const DevRodF& d, const SelfScratch& sc, const View& view, int j,
+                                 bool fill) {
+    int count = 0;
+    if (d.numStretch > d.selfGap) {
+        const float cell = *sc.cellSize;
+        const Vec3f cj = sc.centres[j];
+        const int cx = cellCoord(cj.x, cell), cy = cellCoord(cj.y, cell), cz = cellCoord(cj.z, cell);
+        const Vec3f a0 = view.x[view.P(d.sP0[j])], a1 = view.x[view.P(d.sP1[j])];
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int h = int(hashCell(cx + dx, cy + dy, cz + dz, d.hashTableSize));
+                    for (int e = sc.cellStart[h]; e < sc.cellStart[h + 1]; ++e) {
+                        const int k = sc.sorted[e];
+                        if (k - j < d.selfGap) continue;
+
+                        const Vec3f b0 = view.x[view.P(d.sP0[k])], b1 = view.x[view.P(d.sP1[k])];
+                        float u, v;
+                        closestPointsBetweenSegments(a0, a1, b0, b1, u, v);
+                        const Vec3f delta = (a0 + (a1 - a0) * u) - (b0 + (b1 - b0) * v);
+                        const float dist = norm(delta);
+                        const float separation = dist - 2.0f * d.radius;
+                        if (separation >= 0.0f) continue;
+                        const int slot = sc.segStart[j] + count++;
+                        if (!fill || slot >= d.selfCapacity) continue;
+
+                        DevSelfContactF& c = sc.pool[slot];
+                        c.normal = dist > 1e-12f ? delta / dist : Vec3f(0.0f, 0.0f, 1.0f);
+                        c.idx[0] = d.sP0[j];
+                        c.idx[1] = d.sP1[j];
+                        c.idx[2] = d.sP0[k];
+                        c.idx[3] = d.sP1[k];
+                        c.weight[0] = 1.0f - u;
+                        c.weight[1] = u;
+                        c.weight[2] = -(1.0f - v);
+                        c.weight[3] = -v;
+                        float dotSum = 0.0f;
+                        for (int m = 0; m < 4; ++m)
+                            dotSum += c.weight[m] * dot(view.x[view.P(c.idx[m])], c.normal);
+                        c.offset = dotSum - separation;
+                        c.friction = d.selfFriction;
+                        c.lambdaN = 0.0f;
+                        c.appliedTangential = 0.0f;
+                    }
+                }
+    }
+    if (!fill) sc.segCount[j] = count;
+}
+
+// Counts -> offsets. Contacts past the pool are tallied as overflow.
+__device__ void allocateSelfPool(const DevRodF& d, const SelfScratch& sc) {
+    int total = 0;
+    for (int j = 0; j < d.numStretch; ++j) {
+        sc.segStart[j] = total;
+        total += sc.segCount[j];
+    }
+    *sc.live = total < d.selfCapacity ? total : d.selfCapacity;
+    if (total > d.selfCapacity) *sc.overflow += total - d.selfCapacity;
+}
+
+__device__ void resetSelfMultipliers(const SelfScratch& sc) {
+    for (int c = 0; c < *sc.live; ++c) {
+        sc.pool[c].lambdaN = 0.0f;
+        sc.pool[c].appliedTangential = 0.0f;
+    }
+}
+
+// The four-particle case of projectContacts.
+__device__ void projectSelfContact(const DevRodF& d, const View& view, DevSelfContactF& c) {
+    float wEff = 0.0f;
+    for (int m = 0; m < 4; ++m) wEff += c.weight[m] * c.weight[m] * d.invMass[c.idx[m]];
+    if (wEff <= 0.0f) return;
+
+    float C = -c.offset;
+    for (int m = 0; m < 4; ++m) C += c.weight[m] * dot(view.x[view.P(c.idx[m])], c.normal);
+    float dLambda = -C / wEff;
+    const float clamped = c.lambdaN + dLambda > 0.0f ? c.lambdaN + dLambda : 0.0f;
+    dLambda = clamped - c.lambdaN;
+    c.lambdaN = clamped;
+    if (dLambda != 0.0f)
+        for (int m = 0; m < 4; ++m)
+            view.x[view.P(c.idx[m])] += c.normal * (d.invMass[c.idx[m]] * c.weight[m] * dLambda);
+
+    if (c.friction <= 0.0f || c.lambdaN <= 0.0f) return;
+
+    Vec3f dp;
+    for (int m = 0; m < 4; ++m) {
+        const int pi = view.P(c.idx[m]);
+        dp += (view.x[pi] - view.xPrev[pi]) * c.weight[m];
+    }
+    const Vec3f tangential = dp - c.normal * dot(dp, c.normal);
+    const float slide = norm(tangential);
+    if (slide < 1e-15f) return;
+    const float budget = c.friction * c.lambdaN * wEff - c.appliedTangential;
+    if (budget <= 0.0f) return;
+    const float capped = slide < budget ? slide : budget;
+    c.appliedTangential += capped;
+    const Vec3f correction = tangential * (-capped / slide);
+    for (int m = 0; m < 4; ++m)
+        view.x[view.P(c.idx[m])] += correction * (d.invMass[c.idx[m]] * c.weight[m] / wEff);
+}
+
+__device__ void projectSelfContacts(const DevRodF& d, const SelfScratch& sc, const View& view) {
+    for (int c = 0; c < *sc.live; ++c) projectSelfContact(d, view, sc.pool[c]);
+}
+
 __device__ void predictParticle(const DevRodF& d, const View& view, int i, float h, Vec3f gravity) {
     const int pi = view.P(i);
     view.xPrev[pi] = view.x[pi];
@@ -262,6 +454,30 @@ __global__ void kProjectContacts(DevRodF d, DevStateF s) {
     projectParticleContacts(d, globalView(d, s, idx - i * d.numRods), i);
 }
 
+// Multi-kernel: one thread per rod, each doing its rod's self-collision in
+// sequence. (The per-segment parallel query is used by the fused path, where a
+// block owns one rod; here the parallel axis is already the batch.)
+__global__ void kGenerateSelfContacts(DevRodF d, DevStateF s, bool regenerate) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= d.numRods) return;
+    const SelfScratch sc = globalSelfScratch(d, s, r);
+    const View view = globalView(d, s, r);
+    if (!regenerate) {
+        resetSelfMultipliers(sc);
+        return;
+    }
+    buildSelfHash(d, sc, view);
+    for (int j = 0; j < d.numStretch; ++j) querySelfSegment(d, sc, view, j, false);
+    allocateSelfPool(d, sc);
+    for (int j = 0; j < d.numStretch; ++j) querySelfSegment(d, sc, view, j, true);
+}
+
+__global__ void kProjectSelfContacts(DevRodF d, DevStateF s) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= d.numRods) return;
+    projectSelfContacts(d, globalSelfScratch(d, s, r), globalView(d, s, r));
+}
+
 __global__ void kClearMultipliers(DevRodF d, DevStateF s) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int nS = d.numStretch * d.numRods;
@@ -333,6 +549,21 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     // Contacts live only inside a step (regenerated at its first substep), so
     // they are never loaded from or stored back to global memory.
     DevContactF* scontacts = reinterpret_cast<DevContactF*>(storque + nS);
+    // Self-collision scratch follows, also in shared memory: the query threads
+    // all read the hash and write their own segment's slots.
+    SelfScratch self;
+    if (d.selfCollision) {
+        self.centres = reinterpret_cast<Vec3f*>(scontacts + nP * d.numPrims);
+        self.cellOf = reinterpret_cast<int*>(self.centres + nStretch);
+        self.sorted = self.cellOf + nStretch;
+        self.segCount = self.sorted + nStretch;
+        self.segStart = self.segCount + nStretch;
+        self.live = self.segStart + nStretch;
+        self.overflow = self.live + 1;
+        self.cellStart = self.overflow + 1;
+        self.cellSize = reinterpret_cast<float*>(self.cellStart + d.hashTableSize + 1);
+        self.pool = reinterpret_cast<DevSelfContactF*>(self.cellSize + 1);
+    }
 
     View view;
     view.x = sx;
@@ -373,6 +604,27 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
             for (int i = tid; i < nP; i += nthreads)
                 generateParticleContacts(d, view, i, regenerate);
         }
+        if (d.selfCollision) {
+            // Every stage reads positions, so all of it finishes before any
+            // thread starts predicting (writing) them.
+            if (sub % contactInterval == 0) {
+                if (tid == 0) {
+                    if (sub == 0) *self.overflow = 0;
+                    buildSelfHash(d, self, view);
+                }
+                __syncthreads();
+                for (int j = tid; j < nStretch; j += nthreads)
+                    querySelfSegment(d, self, view, j, false);
+                __syncthreads();
+                if (tid == 0) allocateSelfPool(d, self);
+                __syncthreads();
+                for (int j = tid; j < nStretch; j += nthreads)
+                    querySelfSegment(d, self, view, j, true);
+            } else if (tid == 0) {
+                resetSelfMultipliers(self);
+            }
+            __syncthreads();
+        }
         for (int i = tid; i < nP; i += nthreads) predictParticle(d, view, i, h, gravity);
         for (int j = tid; j < nS; j += nthreads) predictFrame(d, view, j, h);
         __syncthreads();
@@ -392,6 +644,10 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
                 for (int i = tid; i < nP; i += nthreads) projectParticleContacts(d, view, i);
                 __syncthreads();
             }
+            if (d.selfCollision) {
+                if (tid == 0) projectSelfContacts(d, self, view);
+                __syncthreads();
+            }
         }
 
         for (int i = tid; i < nP; i += nthreads) finishParticle(d, view, i, h, linDecay);
@@ -403,6 +659,7 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
         g.x[pOff + i] = sx[i];
         g.v[pOff + i] = sv[i];
     }
+    if (d.selfCollision && tid == 0) g.selfOverflow[r] += *self.overflow;
     for (int j = tid; j < nS; j += nthreads) {
         g.q[sOff + j] = sq[j];
         g.omega[sOff + j] = somega[j];
@@ -428,6 +685,9 @@ void launchMultiKernelStep(const DevRodF& d, const DevStateF& s, const StepConfi
         if (d.numPrims > 0)
             kGenerateContacts<<<blocksFor(totalP, kThreads), kThreads>>>(
                 d, s, sub % cfg.contactInterval == 0);
+        if (d.selfCollision)
+            kGenerateSelfContacts<<<blocksFor(d.numRods, kThreads), kThreads>>>(
+                d, s, sub % cfg.contactInterval == 0);
         kClearMultipliers<<<blocksFor(totalLam, kThreads), kThreads>>>(d, s);
         kPredict<<<blocksFor(totalP, kThreads), kThreads>>>(d, s, cfg.h, cfg.gravity);
         kPredictFrames<<<blocksFor(totalS, kThreads), kThreads>>>(d, s, cfg.h);
@@ -446,6 +706,8 @@ void launchMultiKernelStep(const DevRodF& d, const DevStateF& s, const StepConfi
                     d, s, invH2, begin, count);
             }
             if (d.numPrims > 0) kProjectContacts<<<blocksFor(totalP, kThreads), kThreads>>>(d, s);
+            if (d.selfCollision)
+                kProjectSelfContacts<<<blocksFor(d.numRods, kThreads), kThreads>>>(d, s);
         }
 
         kFinish<<<blocksFor(totalP + totalS, kThreads), kThreads>>>(d, s, cfg.h, cfg.linDecay,

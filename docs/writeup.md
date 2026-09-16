@@ -418,8 +418,43 @@ contact has moved the rod 1.3 cm, and the GPU error there is 1.3e-5 of that.
 Contacts against two primitives cost 20% of fused throughput (0.92 B vs 1.15 B
 at 16 384 × 64).
 
-No Nsight profile has been taken yet, and self-collision still exists only on
-the CPU.
+**Self-collision.** A self contact couples four particles, so contacts inside
+one rod conflict. Colouring them each substep or averaging them Jacobi-style
+would both change the iteration away from the CPU's. Instead, *finding* contacts
+is parallel and *projecting* them is not:
+
+1. Thread 0 builds the hash.
+2. Every segment counts its contacts in parallel.
+3. Thread 0 turns the counts into offsets in a per-rod pool.
+4. Every segment writes its contacts at its offset in parallel.
+5. The pool is projected in order.
+
+That order is exactly the CPU's list order: segments ascending, the 3×3×3 query
+in z/y/x, items ascending within a cell, bucket collisions included.
+
+Two earlier versions were measured and discarded. Doing everything on thread 0
+cut throughput by 50×, because a fused block is only as fast as its slowest
+thread, and the broadphase is about 20× a normal thread's share of a sweep.
+Moving that scratch into shared memory did not help, which is how latency was
+ruled out as the cause. Fixed contact slots per segment overflowed, since one
+segment can own 5 contacts in the coiling case. More slots did not fit a
+block's shared memory. The pool holds half the segment count per rod, against a
+measured peak of 37 for 150 segments, and it counts overflow.
+
+Parity is checked by restart, because coiling is chaotic. The rope from the CPU
+self-collision case is simulated on the CPU until it holds five self contacts.
+That state is uploaded, and both sides take one step. The GPU lands 6.0e-6 m
+from the CPU. The same CPU code built in single precision lands 1.8e-5 m from
+the double build from that identical state, and even ends the step with a
+different number of contacts (6 vs 8). The tolerance is 5e-5 m, and
+self-collision itself moves the rope 6.8e-4 m in that step, 14× the tolerance.
+Multi-kernel and fused agree exactly, and no contact overflows.
+
+Self-collision is the expensive feature: about 0.09× the plain throughput at
+16 384 × 64. The sequential projection is the part a future version would
+colour.
+
+No Nsight profile has been taken yet.
 
 ---
 
@@ -507,8 +542,8 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 This is the section that matters most, so it is specific.
 
 - **The GPU path is partial.** Parity, determinism and throughput are measured
-  (§5), including applied loads, driven ends and world contact, but
-  self-collision is CPU-only, and there is no profiler output.
+  (§5) for every feature, but self-collision costs about 11× in throughput,
+  and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
 - **The timestep envelope is one scenario deep** (§6): a gravity swing, 16–64
   segments. Contact-driven and whipping motion are not covered.

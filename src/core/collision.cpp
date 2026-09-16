@@ -7,24 +7,6 @@ namespace crs {
 
 // ---------------------------------------------------------------- hash
 
-uint32_t hashCell(int ix, int iy, int iz, int tableSize) {
-    // Three large primes; the classic Teschner et al. spatial hash. The xor of
-    // the scaled coordinates is cheap on a GPU and spreads well enough that the
-    // bucket occupancy stays flat for rod-shaped inputs.
-    const uint32_t h = (static_cast<uint32_t>(ix) * 73856093u) ^
-                       (static_cast<uint32_t>(iy) * 19349663u) ^
-                       (static_cast<uint32_t>(iz) * 83492791u);
-    return h % static_cast<uint32_t>(tableSize);
-}
-
-namespace {
-
-int cellCoord(Real v, Real cellSize) {
-    return static_cast<int>(std::floor(v / cellSize));
-}
-
-}  // namespace
-
 void SpatialHash::build(const std::vector<Vec3>& centres, Real cell, int table) {
     cellSize = cell;
     tableSize = table;

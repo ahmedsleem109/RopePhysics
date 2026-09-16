@@ -206,6 +206,23 @@ CRS_HD inline void closestPointsBetweenSegments(TVec3<T> p1, TVec3<T> q1, TVec3<
     }
 }
 
+// ---------------------------------------------------------------- spatial hash
+
+// Three large primes; the classic Teschner et al. spatial hash. The xor of the
+// scaled coordinates is cheap on a GPU and spreads well enough that bucket
+// occupancy stays flat for rod-shaped inputs.
+CRS_HD inline unsigned hashCell(int ix, int iy, int iz, int tableSize) {
+    const unsigned h = (static_cast<unsigned>(ix) * 73856093u) ^
+                       (static_cast<unsigned>(iy) * 19349663u) ^
+                       (static_cast<unsigned>(iz) * 83492791u);
+    return h % static_cast<unsigned>(tableSize);
+}
+
+template <typename T>
+CRS_HD inline int cellCoord(T v, T cellSize) {
+    return static_cast<int>(crsFloor(v / cellSize));
+}
+
 using Primitive = TPrimitive<Real>;
 using Primitivef = TPrimitive<float>;
 
