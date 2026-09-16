@@ -28,6 +28,7 @@ struct View {
     Vec3f* lamB;
     Vec3f* force;   // indexed like x
     Vec3f* torque;  // indexed like q
+    DevContactF* contacts;  // indexed P(i) * numPrims + k
 
     int pBase, pStride;
     int sBase, sStride;
@@ -107,6 +108,68 @@ __device__ void projectBendOne(const DevRodF& d, const View& view, int k, float 
     }
 }
 
+// ---- contacts, rod vs world ------------------------------------------------
+//
+// The single-particle case of collision.cpp / projectContacts, per particle,
+// with the primitives visited in order. Contacts on different particles share
+// no state, so running particles in parallel is the same Gauss-Seidel sweep the
+// CPU does.
+
+// Rebuild one particle's contacts from its position at the start of the
+// substep, or, between regenerations, only reset their multipliers.
+__device__ void generateParticleContacts(const DevRodF& d, const View& view, int i,
+                                         bool regenerate) {
+    const int base = view.P(i) * d.numPrims;
+    for (int k = 0; k < d.numPrims; ++k) {
+        DevContactF& c = view.contacts[base + k];
+        c.lambdaN = 0.0f;
+        c.appliedTangential = 0.0f;
+        if (!regenerate) continue;
+        c.active = 0;
+        if (d.invMass[i] == 0.0f) continue;  // pinned: cannot respond
+        const Vec3f x = view.x[view.P(i)];
+        Vec3f n;
+        const float gap = signedDistance(d.prims[k], x, n) - d.radius;
+        if (gap >= 0.0f) continue;
+        c.active = 1;
+        c.normal = n;
+        c.offset = dot(x, n) - gap;
+        c.friction = d.prims[k].friction;
+    }
+}
+
+__device__ void projectParticleContacts(const DevRodF& d, const View& view, int i) {
+    const int pi = view.P(i);
+    const float w = d.invMass[i];
+    if (w <= 0.0f) return;
+    const int base = pi * d.numPrims;
+    for (int k = 0; k < d.numPrims; ++k) {
+        DevContactF& c = view.contacts[base + k];
+        if (!c.active) continue;
+
+        // --- non-penetration ---
+        const float C = dot(view.x[pi], c.normal) - c.offset;
+        float dLambda = -C / w;
+        const float clamped = c.lambdaN + dLambda > 0.0f ? c.lambdaN + dLambda : 0.0f;
+        dLambda = clamped - c.lambdaN;
+        c.lambdaN = clamped;
+        if (dLambda != 0.0f) view.x[pi] += c.normal * (w * dLambda);
+
+        if (c.friction <= 0.0f || c.lambdaN <= 0.0f) continue;
+
+        // --- Coulomb friction, position level, total capped per substep ---
+        const Vec3f dp = view.x[pi] - view.xPrev[pi];
+        const Vec3f tangential = dp - c.normal * dot(dp, c.normal);
+        const float slide = norm(tangential);
+        if (slide < 1e-15f) continue;
+        const float budget = c.friction * c.lambdaN * w - c.appliedTangential;
+        if (budget <= 0.0f) continue;
+        const float capped = slide < budget ? slide : budget;
+        c.appliedTangential += capped;
+        view.x[pi] += tangential * (-capped / slide);
+    }
+}
+
 __device__ void predictParticle(const DevRodF& d, const View& view, int i, float h, Vec3f gravity) {
     const int pi = view.P(i);
     view.xPrev[pi] = view.x[pi];
@@ -165,6 +228,7 @@ __device__ View globalView(const DevRodF& d, const DevStateF& s, int r) {
     view.lamB = s.lamB;
     view.force = s.force;
     view.torque = s.torque;
+    view.contacts = s.contacts;
     view.pBase = view.sBase = view.lsBase = view.lbBase = r;
     view.pStride = view.sStride = view.lsStride = view.lbStride = d.numRods;
     return view;
@@ -182,6 +246,20 @@ __global__ void kPredictFrames(DevRodF d, DevStateF s, float h) {
     if (idx >= d.numSegments * d.numRods) return;
     const int j = idx / d.numRods;
     predictFrame(d, globalView(d, s, idx - j * d.numRods), j, h);
+}
+
+__global__ void kGenerateContacts(DevRodF d, DevStateF s, bool regenerate) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= d.numParticles * d.numRods) return;
+    const int i = idx / d.numRods;
+    generateParticleContacts(d, globalView(d, s, idx - i * d.numRods), i, regenerate);
+}
+
+__global__ void kProjectContacts(DevRodF d, DevStateF s) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= d.numParticles * d.numRods) return;
+    const int i = idx / d.numRods;
+    projectParticleContacts(d, globalView(d, s, idx - i * d.numRods), i);
 }
 
 __global__ void kClearMultipliers(DevRodF d, DevStateF s) {
@@ -234,7 +312,7 @@ __global__ void kFinish(DevRodF d, DevStateF s, float h, float linDecay, float a
 // The shared allocation puts quaternions first so their 16-byte alignment is
 // satisfied without padding; the 12-byte vectors that follow need only 4.
 __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int iterations,
-                           Vec3f gravity, float linDecay, float angDecay) {
+                           Vec3f gravity, float linDecay, float angDecay, int contactInterval) {
     extern __shared__ char smem[];
     const int r = blockIdx.x;
     if (r >= d.numRods) return;
@@ -252,6 +330,9 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     Vec3f* slamB = slamS + nStretch;
     Vec3f* sforce = slamB + nBend;
     Vec3f* storque = sforce + nP;
+    // Contacts live only inside a step (regenerated at its first substep), so
+    // they are never loaded from or stored back to global memory.
+    DevContactF* scontacts = reinterpret_cast<DevContactF*>(storque + nS);
 
     View view;
     view.x = sx;
@@ -264,6 +345,7 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     view.lamB = slamB;
     view.force = sforce;
     view.torque = storque;
+    view.contacts = scontacts;
     view.pBase = view.sBase = view.lsBase = view.lbBase = 0;
     view.pStride = view.sStride = view.lsStride = view.lbStride = 1;
 
@@ -286,6 +368,11 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     for (int sub = 0; sub < substeps; ++sub) {
         for (int k = tid; k < nStretch; k += nthreads) slamS[k] = Vec3f();
         for (int k = tid; k < nBend; k += nthreads) slamB[k] = Vec3f();
+        if (d.numPrims > 0) {
+            const bool regenerate = sub % contactInterval == 0;
+            for (int i = tid; i < nP; i += nthreads)
+                generateParticleContacts(d, view, i, regenerate);
+        }
         for (int i = tid; i < nP; i += nthreads) predictParticle(d, view, i, h, gravity);
         for (int j = tid; j < nS; j += nthreads) predictFrame(d, view, j, h);
         __syncthreads();
@@ -299,6 +386,10 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
             for (int c = 0; c < d.bNumColors; ++c) {
                 for (int ci = d.bColorStart[c] + tid; ci < d.bColorStart[c + 1]; ci += nthreads)
                     projectBendOne(d, view, d.bOrder[ci], invH2);
+                __syncthreads();
+            }
+            if (d.numPrims > 0) {
+                for (int i = tid; i < nP; i += nthreads) projectParticleContacts(d, view, i);
                 __syncthreads();
             }
         }
@@ -334,6 +425,9 @@ void launchMultiKernelStep(const DevRodF& d, const DevStateF& s, const StepConfi
     const float invH2 = 1.0f / (cfg.h * cfg.h);
 
     for (int sub = 0; sub < cfg.substeps; ++sub) {
+        if (d.numPrims > 0)
+            kGenerateContacts<<<blocksFor(totalP, kThreads), kThreads>>>(
+                d, s, sub % cfg.contactInterval == 0);
         kClearMultipliers<<<blocksFor(totalLam, kThreads), kThreads>>>(d, s);
         kPredict<<<blocksFor(totalP, kThreads), kThreads>>>(d, s, cfg.h, cfg.gravity);
         kPredictFrames<<<blocksFor(totalS, kThreads), kThreads>>>(d, s, cfg.h);
@@ -351,6 +445,7 @@ void launchMultiKernelStep(const DevRodF& d, const DevStateF& s, const StepConfi
                 kProjectBendColor<<<blocksFor(count * d.numRods, kThreads), kThreads>>>(
                     d, s, invH2, begin, count);
             }
+            if (d.numPrims > 0) kProjectContacts<<<blocksFor(totalP, kThreads), kThreads>>>(d, s);
         }
 
         kFinish<<<blocksFor(totalP + totalS, kThreads), kThreads>>>(d, s, cfg.h, cfg.linDecay,
@@ -362,7 +457,8 @@ void launchFusedStep(const DevRodF& d, const DevStateF& s, const StepConfigF& cf
                      std::size_t sharedBytes, int threadsPerBlock) {
     kFusedStep<<<d.numRods, threadsPerBlock, sharedBytes>>>(d, s, cfg.h, cfg.substeps,
                                                             cfg.iterations, cfg.gravity,
-                                                            cfg.linDecay, cfg.angDecay);
+                                                            cfg.linDecay, cfg.angDecay,
+                                                            cfg.contactInterval);
 }
 
 // ---------------------------------------------------------------- device shims

@@ -15,6 +15,7 @@
 
 #include <cstddef>
 
+#include "../core/geometry.h"
 #include "../core/math3.h"
 
 namespace crs {
@@ -48,6 +49,26 @@ struct DevRodF {
     const int* bOrder = nullptr;
     const int* bColorStart = nullptr;
     int bNumColors = 0;
+
+    // The static world every rod collides with, shared by the batch. Rod-vs-world
+    // contact is per particle (a chain of spheres of the rod's radius), exactly
+    // as generateContacts does on the CPU.
+    const Primitivef* prims = nullptr;
+    int numPrims = 0;
+    float radius = 0;
+};
+
+// One potential contact: a (particle, primitive) pair of one rod. Slots are
+// fixed, one per pair, so generation never allocates and projection never
+// needs a list; `active` marks the ones currently penetrating. This is the
+// single-particle case of the CPU Contact (weight 1).
+struct DevContactF {
+    Vec3f normal;
+    float offset = 0;
+    float friction = 0;
+    float lambdaN = 0;
+    float appliedTangential = 0;
+    int active = 0;
 };
 
 // Per-rod state. Layout is decided by the caller: element-major
@@ -66,6 +87,8 @@ struct DevStateF {
     // segment [N m] in WORLD axes, as on the CPU. Same layout as x and q.
     Vec3f* force = nullptr;
     Vec3f* torque = nullptr;
+    // numPrims contact slots per particle, indexed particle-slot * numPrims + k.
+    DevContactF* contacts = nullptr;
 };
 
 struct StepConfigF {
@@ -75,6 +98,7 @@ struct StepConfigF {
     Vec3f gravity;
     float linDecay = 1.0f;
     float angDecay = 1.0f;
+    int contactInterval = 1;  // regenerate contacts every N substeps
 };
 
 // One full step. The colour offsets are needed on the host to issue one launch

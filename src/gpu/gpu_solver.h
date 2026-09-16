@@ -34,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "../core/collision.h"
 #include "../core/coloring.h"
 #include "../core/rod.h"
 
@@ -55,6 +56,7 @@ struct BatchParams {
     float gravityX = 0, gravityY = 0, gravityZ = -9.81f;
     float linearDamping = 0;
     float angularDamping = 0;
+    int contactInterval = 1;  // regenerate world contacts every N substeps
 };
 
 // One batch of identical rods. Topology, rest state and material are shared
@@ -68,10 +70,13 @@ class Batch {
     Batch(const Batch&) = delete;
     Batch& operator=(const Batch&) = delete;
 
-    // Replicate `prototype` across `numRods` environments. Returns false if the
-    // rod cannot be run under this strategy (for kFused, if its state does not
-    // fit in shared memory).
-    bool create(const Rod& prototype, int numRods, Strategy strategy);
+    // Replicate `prototype` across `numRods` environments, optionally colliding
+    // with the static primitives of `world`. Returns false if the batch cannot
+    // run: for kFused, if a rod's state and contacts do not fit in shared
+    // memory; for any strategy, if `world` asks for self-collision, which the
+    // GPU path does not support yet.
+    bool create(const Rod& prototype, int numRods, Strategy strategy,
+                const CollisionWorld* world = nullptr);
     void destroy();
 
     void step(const BatchParams& params);
@@ -106,6 +111,7 @@ class Batch {
     int numRods_ = 0;
     int numSegments_ = 0;
     int numParticles_ = 0;
+    int numPrims_ = 0;
     Strategy strategy_ = Strategy::kMultiKernel;
     Coloring stretchColoring_;
     Coloring bendColoring_;

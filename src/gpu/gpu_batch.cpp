@@ -33,11 +33,26 @@ T* uploadArray(const std::vector<T>& host, std::vector<void*>& owned) {
 // Shared-memory footprint of one rod under the fused strategy: two quaternion
 // arrays per segment; position, previous position, velocity and force per
 // particle; angular velocity and torque per segment; one multiplier per
-// constraint.
-std::size_t fusedSharedBytes(int numParticles, int numSegments, int numStretch, int numBend) {
+// constraint; one contact slot per particle per primitive.
+std::size_t fusedSharedBytes(int numParticles, int numSegments, int numStretch, int numBend,
+                             int numPrims = 0) {
     return 2 * std::size_t(numSegments) * sizeof(Quatf) +
            (4 * std::size_t(numParticles) + 2 * std::size_t(numSegments) + numStretch + numBend) *
-               sizeof(Vec3f);
+               sizeof(Vec3f) +
+           std::size_t(numParticles) * numPrims * sizeof(DevContactF);
+}
+
+Primitivef toF(const Primitive& p) {
+    Primitivef f;
+    f.type = p.type;
+    f.a = toF(p.a);
+    f.b = toF(p.b);
+    f.normal = toF(p.normal);
+    f.halfExtents = toF(p.halfExtents);
+    f.rotation = toF(p.rotation);
+    f.radius = float(p.radius);
+    f.friction = float(p.friction);
+    return f;
 }
 
 std::size_t particleAt(bool rodMajor, int rod, int i, int numParticles, int numRods) {
@@ -121,13 +136,18 @@ int Batch::launchesPerStep(const BatchParams& params) const {
     // one launch for an entire step no matter how many substeps, sweeps or
     // colours it contains; the multi-kernel path pays per colour per sweep.
     if (strategy_ == Strategy::kFused) return 1;
-    const int perSweep = stretchColoring_.numColors() + bendColoring_.numColors();
-    return params.substeps * (3 + params.iterations * perSweep + 1);
+    const int perSweep = stretchColoring_.numColors() + bendColoring_.numColors() +
+                         (numPrims_ > 0 ? 1 : 0);
+    return params.substeps * (3 + params.iterations * perSweep + 1 + (numPrims_ > 0 ? 1 : 0));
 }
 
-bool Batch::create(const Rod& prototype, int numRods, Strategy strategy) {
+bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
+                   const CollisionWorld* world) {
     destroy();
     if (!cudaAvailable()) return false;
+    if (world && world->selfCollision) return false;
+    const int numPrims = world ? static_cast<int>(world->primitives.size()) : 0;
+    numPrims_ = numPrims;
 
     numRods_ = numRods;
     numParticles_ = static_cast<int>(prototype.state.numParticles());
@@ -138,7 +158,7 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy) {
 
     const int nStretch = static_cast<int>(prototype.stretch.size());
     const int nBend = static_cast<int>(prototype.bend.size());
-    sharedBytes_ = fusedSharedBytes(numParticles_, numSegments_, nStretch, nBend);
+    sharedBytes_ = fusedSharedBytes(numParticles_, numSegments_, nStretch, nBend, numPrims);
 
     if (strategy == Strategy::kFused) {
         char name[256] = {0};
@@ -198,6 +218,13 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy) {
     d.bOrder = uploadArray(bendColoring_.order, im.owned);
     d.bColorStart = uploadArray(bendColoring_.colorStart, im.owned);
     d.bNumColors = bendColoring_.numColors();
+    d.numPrims = numPrims;
+    d.radius = float(prototype.material.radius);
+    if (numPrims > 0) {
+        std::vector<Primitivef> prims;
+        for (const Primitive& p : world->primitives) prims.push_back(toF(p));
+        d.prims = uploadArray(prims, im.owned);
+    }
 
     const std::size_t pCount = std::size_t(numParticles_) * numRods;
     const std::size_t sCount = std::size_t(numSegments_) * numRods;
@@ -216,6 +243,14 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy) {
     im.state.lamB = static_cast<Vec3f*>(alloc(std::size_t(nBend) * numRods * sizeof(Vec3f)));
     im.state.force = static_cast<Vec3f*>(alloc(pCount * sizeof(Vec3f)));
     im.state.torque = static_cast<Vec3f*>(alloc(sCount * sizeof(Vec3f)));
+    if (numPrims > 0) {
+        im.state.contacts =
+            static_cast<DevContactF*>(alloc(pCount * numPrims * sizeof(DevContactF)));
+        if (!im.state.contacts) {
+            destroy();
+            return false;
+        }
+    }
     if (!im.state.x || !im.state.q || !im.state.force || !im.state.torque) {
         destroy();
         return false;
@@ -310,6 +345,7 @@ void Batch::step(const BatchParams& params) {
     cfg.gravity = Vec3f(params.gravityX, params.gravityY, params.gravityZ);
     cfg.linDecay = std::exp(-params.linearDamping * cfg.h);
     cfg.angDecay = std::exp(-params.angularDamping * cfg.h);
+    cfg.contactInterval = params.contactInterval > 0 ? params.contactInterval : 1;
 
     if (strategy_ == Strategy::kFused)
         launchFusedStep(im.rod, im.state, cfg, sharedBytes_, im.fusedThreads);

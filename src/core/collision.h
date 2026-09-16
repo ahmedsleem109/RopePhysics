@@ -14,33 +14,13 @@
 #include <cstdint>
 #include <vector>
 
+#include "geometry.h"
 #include "rod.h"
 
 namespace crs {
 
-// ---------------------------------------------------------------- primitives
-
-struct Primitive {
-    enum Type { kPlane = 0, kSphere, kCapsule, kBox };
-
-    int type = kPlane;
-    Vec3 a;            // plane: a point on it; sphere: centre; capsule: end A; box: centre
-    Vec3 b;            // capsule: end B
-    Vec3 normal;       // plane: unit outward normal
-    Vec3 halfExtents;  // box
-    Quat rotation;     // box orientation (body -> world)
-    Real radius = 0;   // sphere / capsule
-    Real friction = 0;
-
-    static Primitive makePlane(Vec3 point, Vec3 unitNormal, Real friction);
-    static Primitive makeSphere(Vec3 centre, Real radius, Real friction);
-    static Primitive makeCapsule(Vec3 endA, Vec3 endB, Real radius, Real friction);
-    static Primitive makeBox(Vec3 centre, Vec3 halfExtents, Quat rotation, Real friction);
-};
-
-// Signed distance from `p` to the primitive's surface (positive outside), with
-// the outward unit normal at the nearest surface point.
-Real signedDistance(const Primitive& prim, Vec3 p, Vec3& outNormal);
+// Primitives, signed distances and segment closest points live in geometry.h,
+// shared with the CUDA kernels.
 
 // ---------------------------------------------------------------- contacts
 
@@ -129,9 +109,5 @@ int selfCollisionIndexGap(const Rod& rod, const CollisionWorld& world);
 // Rebuild `out` from scratch for the rod's current configuration.
 void generateContacts(const Rod& rod, const CollisionWorld& world, ContactSet& out,
                       SpatialHash& hash);
-
-// Closest points between two segments, returned as the parameters along each.
-// Standard clamped-parametric solution; handles parallel and degenerate cases.
-void closestPointsBetweenSegments(Vec3 p1, Vec3 q1, Vec3 p2, Vec3 q2, Real& s, Real& t);
 
 }  // namespace crs

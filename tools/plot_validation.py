@@ -330,6 +330,9 @@ def plot_throughput_gpu(data, figs):
     # CPU vs GPU on the same workload: 64-segment rods, 8 substeps, one sweep,
     # batch size swept. CPU at its full thread count, median of repeats.
     g = read(os.path.join(data, "gpu_throughput.csv"))
+    if "primitives" in g:  # contact-workload rows are reported, not plotted here
+        keep = [i for i, p in enumerate(g["primitives"]) if p == 0]
+        g = {k: [v[i] for i in keep] for k, v in g.items()}
     fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
     series = [("fused", "GPU fused (1 launch/step)", 0), ("multikernel", "GPU multi-kernel", 1)]
     for strat, label, k in series:
