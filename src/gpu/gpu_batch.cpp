@@ -35,11 +35,17 @@ T* uploadArray(const std::vector<T>& host, std::vector<void*>& owned) {
 // particle; angular velocity and torque per segment; one multiplier per
 // constraint; one contact slot per particle per primitive.
 std::size_t fusedSharedBytes(int numParticles, int numSegments, int numStretch, int numBend,
-                             int numPrims = 0) {
-    return 2 * std::size_t(numSegments) * sizeof(Quatf) +
-           (4 * std::size_t(numParticles) + 2 * std::size_t(numSegments) + numStretch + numBend) *
-               sizeof(Vec3f) +
-           std::size_t(numParticles) * numPrims * sizeof(DevContactF);
+                             int numPrims = 0, int selfTableSize = -1, int selfCapacity = 0) {
+    std::size_t bytes =
+        2 * std::size_t(numSegments) * sizeof(Quatf) +
+        (4 * std::size_t(numParticles) + 2 * std::size_t(numSegments) + numStretch + numBend) *
+            sizeof(Vec3f) +
+        std::size_t(numParticles) * numPrims * sizeof(DevContactF);
+    if (selfTableSize >= 0)  // self-collision: per-segment scratch, table, pool
+        bytes += std::size_t(numStretch) * (sizeof(Vec3f) + 4 * sizeof(int)) + 2 * sizeof(int) +
+                 (std::size_t(selfTableSize) + 1) * sizeof(int) + sizeof(float) +
+                 std::size_t(selfCapacity) * sizeof(DevSelfContactF);
+    return bytes;
 }
 
 Primitivef toF(const Primitive& p) {
@@ -136,18 +142,18 @@ int Batch::launchesPerStep(const BatchParams& params) const {
     // one launch for an entire step no matter how many substeps, sweeps or
     // colours it contains; the multi-kernel path pays per colour per sweep.
     if (strategy_ == Strategy::kFused) return 1;
-    const int perSweep = stretchColoring_.numColors() + bendColoring_.numColors() +
-                         (numPrims_ > 0 ? 1 : 0);
-    return params.substeps * (3 + params.iterations * perSweep + 1 + (numPrims_ > 0 ? 1 : 0));
+    const int contactKinds = (numPrims_ > 0 ? 1 : 0) + (selfCollision_ ? 1 : 0);
+    const int perSweep = stretchColoring_.numColors() + bendColoring_.numColors() + contactKinds;
+    return params.substeps * (3 + params.iterations * perSweep + 1 + contactKinds);
 }
 
 bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
                    const CollisionWorld* world) {
     destroy();
     if (!cudaAvailable()) return false;
-    if (world && world->selfCollision) return false;
     const int numPrims = world ? static_cast<int>(world->primitives.size()) : 0;
     numPrims_ = numPrims;
+    selfCollision_ = world && world->selfCollision;
 
     numRods_ = numRods;
     numParticles_ = static_cast<int>(prototype.state.numParticles());
@@ -158,7 +164,11 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
 
     const int nStretch = static_cast<int>(prototype.stretch.size());
     const int nBend = static_cast<int>(prototype.bend.size());
-    sharedBytes_ = fusedSharedBytes(numParticles_, numSegments_, nStretch, nBend, numPrims);
+    // Self contacts per rod: half the segment count, against a measured peak of
+    // 37 for a 150-segment rope coiling into a pile. Overflow is counted.
+    const int selfCapacity = selfCollision_ ? std::max(16, nStretch / 2) : 0;
+    sharedBytes_ = fusedSharedBytes(numParticles_, numSegments_, nStretch, nBend, numPrims,
+                                    selfCollision_ ? world->hashTableSize : -1, selfCapacity);
 
     if (strategy == Strategy::kFused) {
         char name[256] = {0};
@@ -225,6 +235,13 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
         for (const Primitive& p : world->primitives) prims.push_back(toF(p));
         d.prims = uploadArray(prims, im.owned);
     }
+    if (selfCollision_) {
+        d.selfCollision = 1;
+        d.selfGap = selfCollisionIndexGap(prototype, *world);
+        d.selfFriction = float(world->selfFriction);
+        d.hashTableSize = world->hashTableSize;
+        d.selfCapacity = selfCapacity;
+    }
 
     const std::size_t pCount = std::size_t(numParticles_) * numRods;
     const std::size_t sCount = std::size_t(numSegments_) * numRods;
@@ -250,6 +267,34 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
             destroy();
             return false;
         }
+    }
+    if (selfCollision_) {
+        const std::size_t rods = std::size_t(numRods);
+        auto allocInts = [&](std::size_t count) {
+            return static_cast<int*>(alloc(count * sizeof(int)));
+        };
+        im.state.selfCentres = static_cast<Vec3f*>(alloc(rods * nStretch * sizeof(Vec3f)));
+        im.state.selfCellOf = allocInts(rods * nStretch);
+        im.state.selfSorted = allocInts(rods * nStretch);
+        im.state.selfCellStart = allocInts(rods * (std::size_t(d.hashTableSize) + 1));
+        im.state.selfPool = static_cast<DevSelfContactF*>(
+            alloc(rods * std::size_t(selfCapacity) * sizeof(DevSelfContactF)));
+        im.state.selfSegCount = allocInts(rods * nStretch);
+        im.state.selfSegStart = allocInts(rods * nStretch);
+        im.state.selfLive = allocInts(rods);
+        im.state.selfCellSize = static_cast<float*>(alloc(rods * sizeof(float)));
+        im.state.selfOverflow = allocInts(rods);
+        if (!im.state.selfCentres || !im.state.selfCellOf || !im.state.selfSorted ||
+            !im.state.selfCellStart || !im.state.selfPool || !im.state.selfSegCount ||
+            !im.state.selfSegStart || !im.state.selfLive || !im.state.selfCellSize ||
+            !im.state.selfOverflow) {
+            destroy();
+            return false;
+        }
+        const std::vector<int> zeros(rods * nStretch, 0);
+        copyToDevice(im.state.selfSegCount, zeros.data(), rods * nStretch * sizeof(int));
+        copyToDevice(im.state.selfLive, zeros.data(), rods * sizeof(int));
+        copyToDevice(im.state.selfOverflow, zeros.data(), rods * sizeof(int));
     }
     if (!im.state.x || !im.state.q || !im.state.force || !im.state.torque) {
         destroy();
@@ -355,6 +400,15 @@ void Batch::step(const BatchParams& params) {
 }
 
 void Batch::synchronize() const { deviceSynchronize(); }
+
+long long Batch::selfContactOverflow() const {
+    if (!selfCollision_) return 0;
+    std::vector<int> overflow(numRods_);
+    copyToHost(overflow.data(), impl_->state.selfOverflow, numRods_ * sizeof(int));
+    long long total = 0;
+    for (int v : overflow) total += v;
+    return total;
+}
 
 }  // namespace gpu
 }  // namespace crs

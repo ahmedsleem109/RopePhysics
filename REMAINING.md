@@ -40,10 +40,12 @@ compile; they have never executed.
 - [x] Contacts and friction against primitives on the GPU. Geometry shared via
       `src/core/geometry.h`; parity scenario "contact" within the float envelope
       (1.6e-7 m at 200 steps); 20% throughput cost for two primitives.
-- [ ] Self-collision broadphase on the GPU: key kernel → radix sort → cell-start
-      scan (CPU version mirrors these stages in `collision.cpp`).
-- [ ] Contact constraints need colouring too: re-colour per step, or use a
-      Jacobi-style pass for contacts. Decide and measure.
+- [x] Self-collision on the GPU: per-rod hash, parallel count/fill into a pool,
+      projection in CPU order. Restart parity 6e-6 m (float envelope 1.8e-5 m);
+      throughput 0.09x plain.
+- [x] Decided: no colouring. World contacts are per particle and conflict-free;
+      self contacts are projected sequentially per rod to keep the CPU's order.
+      Measured cost above; colouring self contacts is the next speed-up.
 - [x] External forces/torques on the GPU (`Batch::setLoads`); parity scenario
       "loaded" matches the CPU to 4.9e-8 m after one step.
 - [x] Driven fixed frames on the GPU (same API; root twist in the parity case).

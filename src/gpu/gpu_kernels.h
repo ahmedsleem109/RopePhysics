@@ -56,6 +56,26 @@ struct DevRodF {
     const Primitivef* prims = nullptr;
     int numPrims = 0;
     float radius = 0;
+
+    // Self-collision, as generateContacts does it on the CPU. The index gap and
+    // table size come from the host (selfCollisionIndexGap, world.hashTableSize).
+    int selfCollision = 0;
+    int selfGap = 0;
+    float selfFriction = 0;
+    int hashTableSize = 0;
+    int selfCapacity = 0;  // self contacts per rod; more are counted, not stored
+};
+
+// A rod-vs-rod contact: two segments, four particles, weights (1-u, u, -(1-v),
+// -v), one normal. The four-particle case of the CPU Contact.
+struct DevSelfContactF {
+    int idx[4];
+    float weight[4];
+    Vec3f normal;
+    float offset = 0;
+    float friction = 0;
+    float lambdaN = 0;
+    float appliedTangential = 0;
 };
 
 // One potential contact: a (particle, primitive) pair of one rod. Slots are
@@ -89,6 +109,20 @@ struct DevStateF {
     Vec3f* torque = nullptr;
     // numPrims contact slots per particle, indexed particle-slot * numPrims + k.
     DevContactF* contacts = nullptr;
+
+    // Self-collision scratch, always rod-major (rod * size + item) whatever the
+    // strategy, because each rod's self-collision runs sequentially in one
+    // thread. See gpu_solver.cu for why.
+    Vec3f* selfCentres = nullptr;          // numStretch per rod
+    int* selfCellOf = nullptr;             // numStretch per rod
+    int* selfSorted = nullptr;             // numStretch per rod
+    int* selfCellStart = nullptr;          // hashTableSize + 1 per rod
+    DevSelfContactF* selfPool = nullptr;   // selfCapacity per rod
+    int* selfSegCount = nullptr;           // numStretch per rod
+    int* selfSegStart = nullptr;           // numStretch per rod
+    int* selfLive = nullptr;               // one per rod
+    float* selfCellSize = nullptr;         // one per rod
+    int* selfOverflow = nullptr;           // one per rod, contacts dropped (cumulative)
 };
 
 struct StepConfigF {

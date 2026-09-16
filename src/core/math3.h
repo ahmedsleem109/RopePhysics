@@ -32,6 +32,8 @@ constexpr Real kPi = Real(3.14159265358979323846);
 // Scalar helpers that pick the right precision on both sides.
 CRS_HD inline float crsSqrt(float v) { return sqrtf(v); }
 CRS_HD inline double crsSqrt(double v) { return sqrt(v); }
+CRS_HD inline float crsFloor(float v) { return floorf(v); }
+CRS_HD inline double crsFloor(double v) { return floor(v); }
 CRS_HD inline float crsCos(float v) { return cosf(v); }
 CRS_HD inline double crsCos(double v) { return cos(v); }
 CRS_HD inline float crsSin(float v) { return sinf(v); }

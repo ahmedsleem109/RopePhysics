@@ -78,8 +78,6 @@ struct SpatialHash {
     void queryNeighbourhood(Vec3 p, std::vector<int>& out) const;
 };
 
-uint32_t hashCell(int ix, int iy, int iz, int tableSize);
-
 // ---------------------------------------------------------------- generation
 
 struct CollisionWorld {
