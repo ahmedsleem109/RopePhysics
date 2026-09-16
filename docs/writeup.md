@@ -25,13 +25,16 @@ A rod of length `L` is split into `n` segments. It carries two kinds of state:
 Two vector-valued constraints tie them together (Kugelstadt & Schömer 2016):
 
 ```
-stretch/shear   C_s(x_i, x_{i+1}, q_j) = (x_{i+1} - x_i) / l  -  R(q_j) e3
+stretch/shear   C_s(x_i, x_{i+1}, q_j) = R(q_j)^T (x_{i+1} - x_i) / l  -  e3
 bend/twist      C_b(q_a, q_b)          = (2 / lbar) Im(conj(q_a) q_b)  -  Omega_0
 ```
 
 `C_s` is zero when the chord between particles has its rest length and points
-along the frame's tangent: its two transverse components are shear, the axial
-one is stretch. `C_b` is the discrete Darboux vector — the rotation carrying one
+along the frame's tangent. It is measured in the segment's **material frame**,
+so its first two components are shear and the third is stretch for a rod
+pointing in any direction. (Kugelstadt & Schömer write it in world components,
+which is harmless with their single scalar stiffness; with the anisotropic
+compliance of section 2 it is a bug, and this solver had it — see below.) `C_b` is the discrete Darboux vector — the rotation carrying one
 frame into the next, per unit length — minus its rest value. Its first two
 components are curvature, the third is twist.
 
@@ -42,16 +45,17 @@ body frame. That choice is what lets the diagonal body-frame inverse inertia be
 used everywhere without a change of basis. Differentiating:
 
 ```
-dC_s/dx_i = -I/l      dC_s/dx_{i+1} = +I/l      dC_s/dθ_j = R(q_j) [e3]x
+u = R(q_j)^T (x_{i+1} - x_i) / l
+dC_s/dx_i = -R^T/l    dC_s/dx_{i+1} = +R^T/l    dC_s/dθ_j = [u]x
 
 p = conj(q_a) q_b     (taken on the hemisphere of the identity)
 dC_b/dθ_a = (1/lbar) (-p_w I + [p_v]x)
 dC_b/dθ_b = (1/lbar) (+p_w I + [p_v]x)
 ```
 
-For the stretch constraint the rotational block reduces to
-`R diag(Iinv_y, Iinv_x, 0) R^T`. The zero is physics, not an accident: spinning a
-segment about its own tangent does not move the tangent, so twist can only
+For the stretch constraint the rotational block is `[u]x diag(Iinv) [u]x^T`,
+which annihilates rotation about `u`. That is physics, not an accident: spinning
+a segment about its own tangent does not move the tangent, so twist can only
 enter through the bend/twist constraint.
 
 The hemisphere choice matters. `q` and `-q` are the same rotation, but
@@ -117,6 +121,48 @@ unlimited sweeps, a large substep left the pure-moment case with every joint
 carrying 0.77% more moment than was applied — a converged, mesh-independent bias.
 Quartering `h` removed it and restored second-order convergence.
 
+**The compliance must be applied in the frame it is written in.** `alpha_s` is
+diagonal in shear–shear–stretch, i.e. in the material frame. The first version
+of this solver measured `C_s` in world components, so the axial stiffness `EA`
+landed on world `z` whatever the rod's orientation: a cantilever along `x`
+carried `EA` in shear, while the same rod along `z` was right. It went unnoticed
+because the cases passed. `EA/ks GA ≈ 3` barely moves a slender rod's bending
+answer, and with the static cases capped at `n = 64` the cantilever error was
+still dominated by discretization. Refining to `n = 256` — affordable only once
+the static solve was direct (below) — showed the error flattening out, and
+Richardson extrapolation put the limit at `EB + 1.9e-5` against Timoshenko's
+`EB + 5.7e-5`: a third of the shear deflection, which is `ks G / E`. Rotating
+the rod to `z` gave slope 2.00 all the way down. The constraint is now in the
+material frame on the CPU, the GPU kernel and the NumPy mirror, and the
+cantilever case checks that a rod on an oblique axis deflects identically.
+
+### Solving statics directly
+
+The mesh-convergence cases ask a question about the **discretization** — does
+its equilibrium converge to the continuum? — and needed nothing from the XPBD
+iteration except its fixed point. They now get that fixed point directly
+(`src/core/statics.cpp`). The unknowns are the free particle positions and a
+body-frame rotation vector per segment, and equilibrium is
+
+```
+r = J^T alpha^-1 C - f_ext = 0
+```
+
+with applied torques converted into each body frame. Every constraint couples
+neighbouring elements only, so with particle and segment DOFs interleaved the
+Jacobian is banded (half-bandwidth 8: block tridiagonal in element pairs). It is
+built by central differences of the exact residual, perturbing all DOFs more
+than a band apart at once, so a Jacobian costs 34 residual evaluations at any
+length; the solve is a banded LU with partial pivoting, because dead-load
+torques make the Jacobian unsymmetric. Large deflections use load continuation,
+halving a load step whose Newton iteration fails. The pure-moment half circle
+converges in 17 Newton iterations in a single load step.
+
+The XPBD solver is not taken on trust as a result: `solver-convergence` still
+sweeps its budget, and now also checks that the richest budget lands on the
+direct solution (gap 1.2e-8). The cantilever sweep went from 338 s at
+`n ≤ 64` to under a second at `n ≤ 256`.
+
 ![Static tip deflection vs solver budget](figs/solver_convergence.png)
 
 ### Boundary conditions
@@ -138,13 +184,13 @@ case for them, and rotating one about the tangent is how twist is imposed.
 
 | case | reference | result |
 |---|---|---|
-| cantilever | Euler–Bernoulli / Timoshenko | slope 2.23; 0.012% off E–B at n = 64 |
-| pure end moment | exact circular arc of radius `EI/M` | slope 2.02 |
-| tip-load elastica | exact planar elastica by shooting | worst 9.7e-4 L |
+| cantilever | Euler–Bernoulli / Timoshenko | slope 2.00; 7.6e-6 off Timoshenko at n = 256; frame invariant to 2e-12 |
+| pure end moment | exact circular arc of radius `EI/M` | slope 2.01; 1.0e-4 at n = 128 |
+| tip-load elastica | exact planar elastica by shooting | worst 6.3e-4 L |
 | helix | `R = κ/(κ²+τ²)`, pitch `2πτ/(κ²+τ²)` | 2.2e-10 and 5.2e-4 relative |
 | twist buckling | clamped–clamped Michell threshold | 2.3% at n = 32, converging |
-| energy | conservation invariants | momentum to 5e-10; dissipation and gain shrink with substeps |
-| cross-check | independent NumPy implementation | 4.8e-13 m after 200 steps |
+| energy | conservation invariants | momentum to 1e-9; dissipation and gain shrink with substeps |
+| cross-check | independent NumPy implementation | 4.7e-13 m after 200 steps |
 
 Three of these deserve comment.
 
@@ -224,10 +270,10 @@ exclusion now spans a diameter of rest length.
 
 | case | reference | result |
 |---|---|---|
-| primitives | exact rest height on plane, sphere, capsule, box | 5.1e-13; penetration 5e-17 m |
-| incline | slip at `tan α = μ`; `a = g(sin α − μ cos α)` | slip angle within 2.0%, sliding μ within 2.2% |
+| primitives | exact rest height on plane, sphere, capsule, box | 2.2e-16; penetration 5e-17 m |
+| incline | slip at `tan α = μ`; `a = g(sin α − μ cos α)` | slip angle within 1.5%, sliding μ within 1.7% |
 | capstan | `T₂/T₁ = e^{μθ}` at slip | 1.6%, 0.6%, 0.3%, 0.3% at ¼, ½, ¾, 1 turn |
-| self-collision | no interpenetration during sustained contact | 13 simultaneous self-contacts; overlap 0.056% of diameter |
+| self-collision | no interpenetration during sustained contact | 13 simultaneous self-contacts; overlap 0.18% of diameter |
 
 **The capstan** is the sharpest test here, because the answer is exponential in
 both friction and wrap angle. Two things went wrong with it before it worked. At
@@ -298,15 +344,70 @@ to fail a parity gate for reasons unrelated to the GPU.
 
 The kernels build with CUDA 13.1 against MSVC 14.44 (the newer 14.50 in the same
 install is rejected by nvcc; nvcc sees only kernel code, never the host-side
-standard library). They have **not executed**: the installed driver, 576.52,
-supports CUDA up to 12.9, and 13.1 is the only toolkit on the machine with a
-compiler. The GPU cases detect this, print the runtime and driver versions, and
-report *skipped* — never passed. GPU/CPU parity, run-to-run bitwise determinism,
-GPU throughput and any Nsight profile are therefore not established.
+standard library). For most of the project they could not execute: driver 576.52
+supported CUDA up to 12.9. After a driver update (616.92) they ran for the first
+time on an RTX 3060 Laptop GPU, and passed.
+
+**Parity.** The planned check — GPU within 1e-4 m of the colour-ordered CPU after
+200 steps — failed at 2.9e-4 m. It was the tolerance that was wrong, not the
+kernels. The CPU reference was built in single precision (`CRS_REAL_FLOAT`) and
+compared against itself in double: the benchmark trajectory, a gravity-released
+cantilever with one sweep per substep, amplifies rounding from 5e-9 m after one
+step to 3.6e-7 m after ten and 2.5e-4 m after two hundred. The GPU follows that
+curve almost digit for digit (5.43e-9 vs 5.43e-9 at step 1 for n = 16, 3.56e-7 vs
+3.58e-7 at step 10). It also follows the colour-ordered iteration specifically: at
+n = 128 after ten steps it sits 2.8e-8 m from the coloured CPU and 1.1e-5 m from
+the index-ordered one. The case now checks parity after one step (tolerance
+1e-7 m, where any kernel bug shows at full size), drift at 200 steps against the
+measured float envelope, and exact agreement between the two strategies.
+
+**Determinism.** 64-rod batches at 32 and 128 segments, three runs each, both
+strategies: bitwise identical.
+
+**Throughput** (unit: segment-substeps per second, as for the CPU):
+
+| workload (64 segments, 8 substeps) | CPU, 16 threads | GPU multi-kernel | GPU fused |
+|---|---|---|---|
+| 1 rod | 1.8 M | 0.5 M | 5.8 M |
+| 256 rods | 24.4 M | 125 M | 853 M |
+| 16 384 rods | — | 694 M | **1 173 M** |
+
+- **Launch overhead dominates small batches.** Multi-kernel issues 64 launches
+  per step at 8 substeps; at one rod that is ~1 ms per step (~15 µs per launch),
+  against 88 µs for the single fused launch — 11× apart.
+- **The knee** is at about 1 024 rods for the fused path, where one block per rod
+  fills the device; beyond it throughput is flat. Multi-kernel keeps climbing
+  until ~16 k rods and saturates at ~0.6× the fused rate, the cost of reloading
+  state between 64 launches.
+- **Rod length** helps the fused path (1.1 B at 64 segments, 1.86 B at 256): the
+  per-block synchronization cost is amortized over more constraints per colour.
+  Multi-kernel is flat above 64 segments.
+- **Substeps:** fused throughput rises 1.5× from 1 to 32 substeps (0.78 B to
+  1.17 B) as the per-step load/store is amortized; multi-kernel is flat at
+  ~0.62 B, since its launches scale with substeps.
+- The fused path fits rods up to 472 segments in shared memory
+  (`104 n + 24` bytes).
+
+![GPU throughput](figs/throughput_gpu.png)
+
+No Nsight profile has been taken yet, and contacts, self-collision and external
+loads still exist only on the CPU.
 
 ---
 
 ## 6. Stability and the failure study
+
+> **Withdrawn.** Everything in this section was measured before the
+> stretch/shear constraint was moved into the material frame (§2). Rerun after
+> that fix, the stable timesteps rose 5–20×, the tight "0.66 elements per sweep"
+> collapse became a 16× spread, and boundedness stopped being monotone in `dt`: a
+> 128-segment rod blows up at 1 ms yet survives 3–10 ms. Tracing runs near the
+> limit in both versions shows why none of it measured usable behaviour: with one
+> sweep per step the constraints were barely solved (axial strain up to 80%, shear
+> up to 265%), and the energy criterion only asked whether that unconverged state
+> eventually exploded. A stability study needs an accuracy criterion (bounded
+> constraint error), not an energy bound. The text below is kept as a record of
+> what was believed and why.
 
 "XPBD is unconditionally stable" is true with respect to constraint stiffness and
 false in general, and the useful question is what the actual limit is.
@@ -358,8 +459,8 @@ Batched independent rods, stepped across threads. The unit is segment-substeps
 per second, because a substep is the unit of solver work and counting frame steps
 would let a low substep count inflate the number.
 
-- **Peak 23–24 M segment-substeps/s** on 16 threads (23.2 M and 24.0 M in two
-  separate runs; the video shows the first).
+- **Peak 23–25 M segment-substeps/s** on 16 threads (23.2 M and 24.0 M in two
+  separate runs, 24.8 M after the material-frame fix; the video shows the first).
 - **Thread scaling:** 1.90 M on one thread to 22.1 M on sixteen, 11.6×.
 - **Batch size:** 1.9 M for a single rod, 14 M at 16 rods, flat above ~64 rods —
   below that, per-thread work is too small to amortize thread startup.
@@ -381,16 +482,16 @@ and 256 independent rods run **1.7× faster than real time on sixteen**.
 
 This is the section that matters most, so it is specific.
 
-- **The GPU has not run.** Everything in §5 about the kernels' correctness,
-  determinism and speed is design and compilation, not measurement. There is no
-  GPU headline number, no GPU-vs-CPU plot, and no profiler output.
-- **Static equilibria are relaxed, not solved.** Their convergence is verified,
-  but getting there costs a Gauss–Seidel budget quadratic in the segment count,
-  which is why the suite is slow. A direct block-tridiagonal solve would be the
-  fix for a reference solver.
-- **Resolutions are modest.** Second order is shown up to n = 64 for the
-  cantilever and n = 32 for the moment case; twist buckling is first order over
-  n = 12–32 and 2.3% off at the finest mesh.
+- **The GPU path is partial.** Parity, determinism and throughput are measured
+  (§5), but only for gravity-loaded rods: contacts, self-collision, external
+  loads and driven ghost frames are CPU-only, and there is no profiler output.
+  GPU parity is established to float rounding, not bitwise against the CPU.
+- **The stability characterization is withdrawn** (§6). There is currently no
+  validated statement of the largest usable timestep.
+- **The demo scenes were simulated before the material-frame fix** and should
+  be re-run.
+- **Twist buckling** is first order over n = 12–32 and 2.3% off at the finest
+  mesh.
 - **Energy is dissipated,** not conserved. Only its convergence with substeps is
   established, over 2–16 substeps.
 - **Contact is simplified.** Rod–world contact is per particle (a chain of
