@@ -26,6 +26,8 @@ struct View {
     Vec3f* omega;
     Vec3f* lamS;
     Vec3f* lamB;
+    Vec3f* force;   // indexed like x
+    Vec3f* torque;  // indexed like q
 
     int pBase, pStride;
     int sBase, sStride;
@@ -109,7 +111,7 @@ __device__ void predictParticle(const DevRodF& d, const View& view, int i, float
     const int pi = view.P(i);
     view.xPrev[pi] = view.x[pi];
     if (d.invMass[i] == 0.0f) return;
-    view.v[pi] += gravity * h;
+    view.v[pi] += (gravity + view.force[pi] * d.invMass[i]) * h;
     view.x[pi] += view.v[pi] * h;
 }
 
@@ -118,8 +120,11 @@ __device__ void predictFrame(const DevRodF& d, const View& view, int j, float h)
     view.qPrev[si] = view.q[si];
     const Vec3f iI = d.invInertia[j];
     if (norm2(iI) == 0.0f) return;
+    // Free-body precession plus applied torque, in the body frame (the torque
+    // is stored in world axes), exactly as solver.cpp.
     const Vec3f w = view.omega[si];
-    view.omega[si] = w + cwise(iI, -cross(w, cwise(d.inertia[j], w))) * h;
+    const Vec3f tau = rotateInv(view.q[si], view.torque[si]);
+    view.omega[si] = w + cwise(iI, tau - cross(w, cwise(d.inertia[j], w))) * h;
     view.q[si] = normalize(view.q[si] + (view.q[si] * Quatf(0.0f, view.omega[si])) * (0.5f * h));
 }
 
@@ -158,6 +163,8 @@ __device__ View globalView(const DevRodF& d, const DevStateF& s, int r) {
     view.omega = s.omega;
     view.lamS = s.lamS;
     view.lamB = s.lamB;
+    view.force = s.force;
+    view.torque = s.torque;
     view.pBase = view.sBase = view.lsBase = view.lbBase = r;
     view.pStride = view.sStride = view.lsStride = view.lbStride = d.numRods;
     return view;
@@ -243,6 +250,8 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     Vec3f* somega = sv + nP;
     Vec3f* slamS = somega + nS;
     Vec3f* slamB = slamS + nStretch;
+    Vec3f* sforce = slamB + nBend;
+    Vec3f* storque = sforce + nP;
 
     View view;
     view.x = sx;
@@ -253,6 +262,8 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     view.omega = somega;
     view.lamS = slamS;
     view.lamB = slamB;
+    view.force = sforce;
+    view.torque = storque;
     view.pBase = view.sBase = view.lsBase = view.lbBase = 0;
     view.pStride = view.sStride = view.lsStride = view.lbStride = 1;
 
@@ -262,10 +273,12 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     for (int i = tid; i < nP; i += nthreads) {
         sx[i] = g.x[pOff + i];
         sv[i] = g.v[pOff + i];
+        sforce[i] = g.force[pOff + i];
     }
     for (int j = tid; j < nS; j += nthreads) {
         sq[j] = g.q[sOff + j];
         somega[j] = g.omega[sOff + j];
+        storque[j] = g.torque[sOff + j];
     }
     __syncthreads();
 

@@ -62,6 +62,10 @@ struct DevStateF {
     Vec3f* lamB = nullptr;
     Quatf* q = nullptr;
     Quatf* qPrev = nullptr;
+    // Applied loads, per rod: force on each particle [N] and torque on each
+    // segment [N m] in WORLD axes, as on the CPU. Same layout as x and q.
+    Vec3f* force = nullptr;
+    Vec3f* torque = nullptr;
 };
 
 struct StepConfigF {
