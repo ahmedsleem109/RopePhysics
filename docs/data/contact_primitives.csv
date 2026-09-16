@@ -1,0 +1,5 @@
+shape,rest_height,expected,error,max_penetration,steps,converged
+plane,0.005,0.005,0,0,8000,0
+sphere,0.255,0.255,5.11791045273e-13,5.11743425413e-17,1597,1
+capsule,0.155,0.155,0,0,8000,0
+box,0.205,0.205,0,0,8000,0
