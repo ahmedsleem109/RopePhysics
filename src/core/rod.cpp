@@ -211,6 +211,7 @@ Rod finishBuild(const std::vector<Vec3>& pts, const std::vector<Quat>& frames,
     s.xPrev = pts;
     s.v.assign(nP, Vec3());
     s.extForce.assign(nP, Vec3());
+    s.kinematicVelocity.assign(nP, Vec3());
     s.mass.assign(nP, Real(0));
     s.invMass.assign(nP, Real(0));
 

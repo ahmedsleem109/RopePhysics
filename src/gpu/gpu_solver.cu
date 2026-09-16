@@ -27,6 +27,7 @@ struct View {
     Vec3f* lamS;
     Vec3f* lamB;
     Vec3f* force;   // indexed like x
+    Vec3f* kinVel;  // indexed like x
     Vec3f* torque;  // indexed like q
     DevContactF* contacts;  // indexed P(i) * numPrims + k
 
@@ -365,7 +366,10 @@ __device__ void projectSelfContacts(const DevRodF& d, const SelfScratch& sc, con
 __device__ void predictParticle(const DevRodF& d, const View& view, int i, float h, Vec3f gravity) {
     const int pi = view.P(i);
     view.xPrev[pi] = view.x[pi];
-    if (d.invMass[i] == 0.0f) return;
+    if (d.invMass[i] == 0.0f) {
+        view.x[pi] += view.kinVel[pi] * h;  // prescribed motion
+        return;
+    }
     view.v[pi] += (gravity + view.force[pi] * d.invMass[i]) * h;
     view.x[pi] += view.v[pi] * h;
 }
@@ -386,7 +390,7 @@ __device__ void predictFrame(const DevRodF& d, const View& view, int j, float h)
 __device__ void finishParticle(const DevRodF& d, const View& view, int i, float h, float linDecay) {
     const int pi = view.P(i);
     if (d.invMass[i] == 0.0f) {
-        view.v[pi] = Vec3f();
+        view.v[pi] = view.kinVel[pi];
         return;
     }
     view.v[pi] = (view.x[pi] - view.xPrev[pi]) / h * linDecay;
@@ -419,6 +423,7 @@ __device__ View globalView(const DevRodF& d, const DevStateF& s, int r) {
     view.lamS = s.lamS;
     view.lamB = s.lamB;
     view.force = s.force;
+    view.kinVel = s.kinematicVelocity;
     view.torque = s.torque;
     view.contacts = s.contacts;
     view.pBase = view.sBase = view.lsBase = view.lbBase = r;
@@ -546,9 +551,10 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     Vec3f* slamB = slamS + nStretch;
     Vec3f* sforce = slamB + nBend;
     Vec3f* storque = sforce + nP;
+    Vec3f* skinvel = storque + nS;
     // Contacts live only inside a step (regenerated at its first substep), so
     // they are never loaded from or stored back to global memory.
-    DevContactF* scontacts = reinterpret_cast<DevContactF*>(storque + nS);
+    DevContactF* scontacts = reinterpret_cast<DevContactF*>(skinvel + nP);
     // Self-collision scratch follows, also in shared memory: the query threads
     // all read the hash and write their own segment's slots.
     SelfScratch self;
@@ -575,6 +581,7 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     view.lamS = slamS;
     view.lamB = slamB;
     view.force = sforce;
+    view.kinVel = skinvel;
     view.torque = storque;
     view.contacts = scontacts;
     view.pBase = view.sBase = view.lsBase = view.lbBase = 0;
@@ -587,6 +594,7 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
         sx[i] = g.x[pOff + i];
         sv[i] = g.v[pOff + i];
         sforce[i] = g.force[pOff + i];
+        skinvel[i] = g.kinematicVelocity[pOff + i];
     }
     for (int j = tid; j < nS; j += nthreads) {
         sq[j] = g.q[sOff + j];

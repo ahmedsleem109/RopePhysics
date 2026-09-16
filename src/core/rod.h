@@ -51,6 +51,10 @@ struct RodState {
     std::vector<Vec3> x, xPrev, v;
     std::vector<Real> invMass, mass;
     std::vector<Vec3> extForce;  // external force per particle [N], zero by default
+    // Velocity [m/s] at which a PINNED particle is moved each substep: how a
+    // gripper or any other prescribed motion drives the rod. Ignored for free
+    // particles. Zero by default, so a pinned particle stays put.
+    std::vector<Vec3> kinematicVelocity;
 
     // Segments (orientation elements). omega is in the BODY frame, matching the
     // right-multiplied rotation increment the solver uses.

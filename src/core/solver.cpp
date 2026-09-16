@@ -222,7 +222,10 @@ void substep(Rod& rod, const SolverParams& p, Real h, ContactSet* contacts) {
     // --- predict ---
     for (std::size_t i = 0; i < nP; ++i) {
         s.xPrev[i] = s.x[i];
-        if (s.invMass[i] == Real(0)) continue;
+        if (s.invMass[i] == Real(0)) {
+            s.x[i] += s.kinematicVelocity[i] * h;  // prescribed motion
+            continue;
+        }
         s.v[i] += (p.gravity + s.extForce[i] * s.invMass[i]) * h;
         s.x[i] += s.v[i] * h;
     }
@@ -248,7 +251,7 @@ void substep(Rod& rod, const SolverParams& p, Real h, ContactSet* contacts) {
     const Real angDecay = std::exp(-p.angularDamping * h);
     for (std::size_t i = 0; i < nP; ++i) {
         if (s.invMass[i] == Real(0)) {
-            s.v[i] = Vec3();
+            s.v[i] = s.kinematicVelocity[i];
             continue;
         }
         s.v[i] = (s.x[i] - s.xPrev[i]) / h * linDecay;
