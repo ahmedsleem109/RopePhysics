@@ -108,6 +108,13 @@ struct DevStateF {
     Vec3f* force = nullptr;
     Vec3f* torque = nullptr;
     Vec3f* kinematicVelocity = nullptr;  // pinned particles move at this, as on the CPU
+    // Per-rod material randomization, one value per rod. Every compliance is
+    // multiplied by complianceScale (= reference Young's modulus / this rod's,
+    // exactly equivalent to building the rod with that modulus, since shear
+    // and torsion scale with E at fixed Poisson ratio), and every contact
+    // friction coefficient by frictionScale. Both default to 1.
+    float* complianceScale = nullptr;
+    float* frictionScale = nullptr;
     // numPrims contact slots per particle, indexed particle-slot * numPrims + k.
     DevContactF* contacts = nullptr;
 

@@ -30,6 +30,8 @@ struct View {
     Vec3f* kinVel;  // indexed like x
     Vec3f* torque;  // indexed like q
     DevContactF* contacts;  // indexed P(i) * numPrims + k
+    float complianceScale;  // this rod's material randomization
+    float frictionScale;
 
     int pBase, pStride;
     int sBase, sStride;
@@ -56,7 +58,7 @@ __device__ void projectStretchOne(const DevRodF& d, const View& view, int k, flo
     const Vec3f u = rotateInv(q, view.x[view.P(i1)] - view.x[view.P(i0)]) / l;
     const Vec3f C = u - Vec3f(0, 0, 1);
 
-    const Vec3f alpha = d.sCompliance[k] * invH2;
+    const Vec3f alpha = d.sCompliance[k] * (invH2 * view.complianceScale);
     Mat3f A = Mat3f::identity((w0 + w1) / (l * l)) + sandwichDiag(Mat3f::skew(u), iI);
     A.m[0][0] += alpha.x;
     A.m[1][1] += alpha.y;
@@ -88,7 +90,7 @@ __device__ void projectBendOne(const DevRodF& d, const View& view, int k, float 
     const Mat3f Ja = (Mat3f::identity(-p.w) + skewPv) * (1.0f / lbar);
     const Mat3f Jb = (Mat3f::identity(p.w) + skewPv) * (1.0f / lbar);
 
-    const Vec3f alpha = d.bCompliance[k] * invH2;
+    const Vec3f alpha = d.bCompliance[k] * (invH2 * view.complianceScale);
     Mat3f A = sandwichDiag(Ja, iIa) + sandwichDiag(Jb, iIb);
     A.m[0][0] += alpha.x;
     A.m[1][1] += alpha.y;
@@ -135,7 +137,7 @@ __device__ void generateParticleContacts(const DevRodF& d, const View& view, int
         c.active = 1;
         c.normal = n;
         c.offset = dot(x, n) - gap;
-        c.friction = d.prims[k].friction;
+        c.friction = d.prims[k].friction * view.frictionScale;
     }
 }
 
@@ -297,7 +299,7 @@ __device__ void querySelfSegment(const DevRodF& d, const SelfScratch& sc, const 
                         for (int m = 0; m < 4; ++m)
                             dotSum += c.weight[m] * dot(view.x[view.P(c.idx[m])], c.normal);
                         c.offset = dotSum - separation;
-                        c.friction = d.selfFriction;
+                        c.friction = d.selfFriction * view.frictionScale;
                         c.lambdaN = 0.0f;
                         c.appliedTangential = 0.0f;
                     }
@@ -426,6 +428,8 @@ __device__ View globalView(const DevRodF& d, const DevStateF& s, int r) {
     view.kinVel = s.kinematicVelocity;
     view.torque = s.torque;
     view.contacts = s.contacts;
+    view.complianceScale = s.complianceScale[r];
+    view.frictionScale = s.frictionScale[r];
     view.pBase = view.sBase = view.lsBase = view.lbBase = r;
     view.pStride = view.sStride = view.lsStride = view.lbStride = d.numRods;
     return view;
@@ -584,6 +588,8 @@ __global__ void kFusedStep(DevRodF d, DevStateF g, float h, int substeps, int it
     view.kinVel = skinvel;
     view.torque = storque;
     view.contacts = scontacts;
+    view.complianceScale = g.complianceScale[r];
+    view.frictionScale = g.frictionScale[r];
     view.pBase = view.sBase = view.lsBase = view.lbBase = 0;
     view.pStride = view.sStride = view.lsStride = view.lbStride = 1;
 

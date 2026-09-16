@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <memory>
 
 #include "../core/coloring.h"
 #include "../core/solver.h"
@@ -311,6 +312,111 @@ CaseResult runGpuParity(const std::string& outDir) {
                             contactEffect, contactErrorAt50));
     res.checks.push_back(makeRangeCheck("GPU contact error under 1% of the contact effect",
                                         contactErrorAt50 / contactEffect, 0.0, 0.01));
+
+    // ---- per-rod material randomization ----------------------------------------
+    //
+    // Batch::setMaterialScales must be exactly equivalent to building each rod
+    // with its own Young's modulus and friction. Each property is tested where
+    // it visibly matters, rod 0 of a two-rod batch at the prototype's material
+    // and rod 1 scaled, each compared with a CPU rod built with that material:
+    //   stiffness -- the benchmark cantilever swinging, three times stiffer;
+    //   friction  -- a free rod on a 20 degree incline with mu = 0.5, which
+    //                holds (tan 20 = 0.36), against half that, which slides.
+    {
+        auto coloredStepper = [](const Rod& rod, const SolverParams& p) {
+            struct Stepper {
+                Coloring sc, bc;
+                SolverParams pc;
+            };
+            auto st = std::make_shared<Stepper>();
+            st->sc = colorStretchConstraints(rod);
+            st->bc = colorBendConstraints(rod);
+            st->pc = p;
+            st->pc.stretchColoring = &st->sc;
+            st->pc.bendColoring = &st->bc;
+            return st;
+        };
+        const SolverParams p = benchmarkParams();
+        const gpu::BatchParams bp = toBatchParams(p);
+
+        // Stiffness.
+        const int stiffSteps = 20;
+        double stiffError = 1e9, stiffEffect = 0;
+        {
+            const Rod prototype = makeBenchmarkRod(16);
+            gpu::Batch batch;
+            if (batch.create(prototype, 2, gpu::Strategy::kFused)) {
+                batch.setMaterialScales({1.0f, 3.0f}, {});
+                for (int i = 0; i < stiffSteps; ++i) batch.step(bp);
+                batch.synchronize();
+                RodMaterial stiffer = referenceMaterial();
+                stiffer.youngs *= 3;
+                Rod cpuPlain = prototype;
+                Rod cpuStiff = makeStraightRod(16, Real(1), stiffer, Vec3(0, 0, 0), Vec3(1, 0, 0));
+                clampRootExact(cpuStiff);
+                const auto st = coloredStepper(cpuPlain, p);
+                for (int i = 0; i < stiffSteps; ++i) {
+                    step(cpuPlain, st->pc);
+                    step(cpuStiff, st->pc);
+                }
+                Rod g0 = prototype, g1 = prototype;
+                batch.download(0, g0);
+                batch.download(1, g1);
+                stiffError = std::max(maxPositionDifference(cpuPlain, g0),
+                                      maxPositionDifference(cpuStiff, g1));
+                stiffEffect = maxPositionDifference(cpuPlain, cpuStiff);
+            }
+        }
+
+        // Friction.
+        const int slideSteps = 150;
+        double slideError = 1e9, slideEffect = 0;
+        {
+            const Real tilt = Real(20.0 * kPi / 180.0);
+            const Vec3 normal(std::sin(tilt), 0, std::cos(tilt));
+            CollisionWorld incline;
+            incline.primitives.push_back(Primitive::makePlane(Vec3(), normal, Real(0.5)));
+            const RodMaterial mat = referenceMaterial();
+            // Lying across the slope, just touching it.
+            const Vec3 start = normal * (mat.radius + Real(1e-4)) + Vec3(0, Real(-0.5), 0);
+            const Rod prototype = makeStraightRod(16, Real(1), mat, start, Vec3(0, 1, 0));
+            gpu::Batch batch;
+            if (batch.create(prototype, 2, gpu::Strategy::kFused, &incline)) {
+                batch.setMaterialScales({}, {1.0f, 0.5f});
+                for (int i = 0; i < slideSteps; ++i) batch.step(bp);
+                batch.synchronize();
+                CollisionWorld slippery = incline;
+                slippery.primitives.front().friction *= Real(0.5);
+                Rod cpuGrip = prototype, cpuSlide = prototype;
+                const auto st = coloredStepper(cpuGrip, p);
+                SolverContext c0, c1;
+                for (int i = 0; i < slideSteps; ++i) {
+                    step(cpuGrip, st->pc, incline, c0);
+                    step(cpuSlide, st->pc, slippery, c1);
+                }
+                Rod g0 = prototype, g1 = prototype;
+                batch.download(0, g0);
+                batch.download(1, g1);
+                slideError = std::max(maxPositionDifference(cpuGrip, g0),
+                                      maxPositionDifference(cpuSlide, g1));
+                slideEffect = maxPositionDifference(cpuGrip, cpuSlide);
+            }
+        }
+
+        res.notes.push_back(fmt("  per-rod stiffness: GPU-CPU %.3g m, 3x stiffness changes the rod "
+                                "%.3g m (%.0f steps)",
+                                stiffError, stiffEffect, double(stiffSteps)));
+        res.notes.push_back(fmt("  per-rod friction: GPU-CPU %.3g m, half friction changes the rod "
+                                "%.3g m (%.0f steps)",
+                                slideError, slideEffect, double(slideSteps)));
+        // Relative, because float drift grows with how far the rod moves: the
+        // GPU must reproduce each scaled rod to within 2% of what the scaling
+        // itself changes (measured: 0.7% for stiffness, 0.1% for friction).
+        res.checks.push_back(makeRangeCheck("per-rod stiffness matches the CPU (error / effect)",
+                                            stiffError / std::max(stiffEffect, 1e-30), 0.0, 0.02));
+        res.checks.push_back(makeRangeCheck("per-rod friction matches the CPU (error / effect)",
+                                            slideError / std::max(slideEffect, 1e-30), 0.0, 0.02));
+    }
 
     // ---- self-collision -------------------------------------------------------
     //
