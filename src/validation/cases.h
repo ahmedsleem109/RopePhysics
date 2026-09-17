@@ -62,6 +62,7 @@ CaseResult runColoring(const std::string& outDir);         // conflict-free, 2 c
 CaseResult runGpuParity(const std::string& outDir);        // GPU reproduces the CPU
 CaseResult runGpuDeterminism(const std::string& outDir);   // bitwise, run to run
 CaseResult runGpuThroughput(const std::string& outDir);    // scaling curves
+CaseResult runGpuSuite(const std::string& outDir);         // Phase 1-2 cases on the GPU
 
 // Phase 4: scale and characterization.
 CaseResult runTimestepEnvelope(const std::string& outDir);  // largest accurate substep

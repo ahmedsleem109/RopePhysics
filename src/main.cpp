@@ -40,6 +40,7 @@ const Entry kCases[] = {
     {"gpu-parity", crs::runGpuParity},
     {"gpu-determinism", crs::runGpuDeterminism},
     {"gpu-throughput", crs::runGpuThroughput},
+    {"gpu-suite", crs::runGpuSuite},
     {"timestep-envelope", crs::runTimestepEnvelope},
     {"timestep-convergence", crs::runTimestepConvergence},
     {"timestep-motions", crs::runTimestepMotions},
