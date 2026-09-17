@@ -30,7 +30,8 @@ Nsight-profile the learning batch.
 - WSL Ubuntu has g++ (use for float-vs-double builds with `-DCRS_REAL_FLOAT`).
 - Pushes: SSH key is not on GitHub; push with
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push https://github.com/ahmedsleem109/RopePhysics.git <branches>`.
-  Pushes do not trigger CI (unknown why); dispatch manually.
+  Push ONE branch per `git push`: pushes naming several refs at once created
+  no workflow runs (observed 2026-09-17); single-ref pushes trigger CI.
 - Workflow the user asked for: each feature on its own branch, merged to main
   with --no-ff, pushed.
 
@@ -52,9 +53,9 @@ Nsight-profile the learning batch.
   (rolling / torsional friction); segment-based rod–primitive contact.
   Done 2026-09-17: `capstan-mu` (μ 0.1–0.75, worst 0.71%) and
   `timestep-convergence` (first order in the substep, observed 1.00).
-- **CI:** find why pushes don't trigger workflows; bump actions to Node 24
-  versions (checkout@v5, setup-python@v6, upload-artifact@v5); consider a
-  shorter per-commit suite (twist buckling 9 min, capstan 3 min).
+- **CI:** consider a shorter per-commit suite (twist buckling 9 min, capstan
+  3 min). Done 2026-09-17: actions on Node 24 releases; pushes trigger CI when
+  each branch is pushed on its own.
 - **Media:** re-render the long demo video (tools/make_video.py) with the fixed
   solver, GPU numbers and repo link
   (`--repo "https://github.com/ahmedsleem109/RopePhysics"`); host demo.mp4 as a
