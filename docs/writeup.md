@@ -272,7 +272,8 @@ exclusion now spans a diameter of rest length.
 |---|---|---|
 | primitives | exact rest height on plane, sphere, capsule, box | 2.2e-16; penetration 5e-17 m |
 | incline | slip at `tan α = μ`; `a = g(sin α − μ cos α)` | slip angle within 1.5%, sliding μ within 1.7% |
-| capstan | `T₂/T₁ = e^{μθ}` at slip | 1.6%, 0.6%, 0.3%, 0.3% at ¼, ½, ¾, 1 turn |
+| capstan | `T₂/T₁ = e^{μθ}` at slip | 1.6%, 0.6%, 0.3%, 0.3% at ¼, ½, ¾, 1 turn (μ = 0.25) |
+| capstan across μ | `e^{μπ}` at half a turn | worst 0.71% over μ = 0.1, 0.25, 0.5, 0.75 (ratio 1.37 to 10.6) |
 | self-collision | no interpenetration during sustained contact | 13 simultaneous self-contacts; overlap 0.18% of diameter |
 
 **The capstan** is the sharpest test here, because the answer is exponential in
@@ -288,6 +289,15 @@ cutoff relative to the fastest slip, the one-turn threshold is 4.796 against
 4.811.
 
 ![Capstan](figs/capstan.png)
+
+A second case, `capstan-mu`, holds the wrap at half a turn and varies friction
+from 0.1 to 0.75. That separates the two things in the exponent: a contact
+model can be right at one coefficient and still scale wrongly with μ, for
+example if the normal force saturated or the friction cone were clipped per
+iteration. The measured threshold follows `e^{μπ}` to within 0.71% across a
+ratio of 1.37 to 10.6.
+
+![Capstan across friction coefficients](figs/capstan_mu.png)
 
 **Self-collision** also had a test that passed while proving nothing: a loop
 meant to tighten onto itself never did, and "no interpenetration" held trivially
@@ -603,6 +613,18 @@ covered.
 
 ![Timestep envelope](figs/timestep_envelope.png)
 
+**Convergence in time.** Mesh refinement is established in §3. The
+`timestep-convergence` case does the same in time: the swinging cantilever
+(16 segments, `E = 1e7`, one sweep per substep) runs for 0.25 s with the
+substep halved from 1/4 ms to 1/1024 ms. There is no closed-form trajectory, so
+convergence is measured against itself: how far the whole rod moves each time
+the substep is halved. That distance halves too. The observed order goes 1.18,
+1.10, 1.05, 1.03, 1.01, 1.00, 1.00: first order, as expected for XPBD's
+backward-Euler-like substep. At a 1/4 ms substep the remaining error is about
+1/1000 of how far the rod has moved (0.35 mm of 0.34 m).
+
+![Timestep convergence](figs/timestep_convergence.png)
+
 ---
 
 ## 9. Throughput (CPU)
@@ -650,8 +672,9 @@ This is the section that matters most, so it is specific.
   spheres), valid while segments are no longer than about their diameter;
   contacts apply no torque to frames, so rolling and torsional friction are
   absent.
-- **Friction validation is narrow:** one incline geometry and one capstan
-  coefficient (μ = 0.25). The capstan rope's density is unphysical by design.
+- **Friction validation is narrow:** one incline geometry; the capstan covers
+  four wrap angles at μ = 0.25 and four coefficients at half a turn. The capstan
+  rope's density is unphysical by design.
 - **The stability rule is one scenario deep** and restricted to elements longer
   than the rod's diameter.
 - **The demo video's simulations ran on the CPU,** and it says so on screen,

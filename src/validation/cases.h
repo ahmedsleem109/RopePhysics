@@ -54,6 +54,7 @@ CaseResult runEnergyDrift(const std::string& outDir);     // free flight conserv
 CaseResult runContactPrimitives(const std::string& outDir);  // rest height on 4 primitives
 CaseResult runIncline(const std::string& outDir);            // slip angle and friction law
 CaseResult runCapstan(const std::string& outDir);            // exp(mu theta) tension ratio
+CaseResult runCapstanFrictionSweep(const std::string& outDir);  // capstan across mu
 CaseResult runSelfCollision(const std::string& outDir);      // no interpenetration
 
 // Phase 3: constraint coloring and the CUDA port.
@@ -64,6 +65,7 @@ CaseResult runGpuThroughput(const std::string& outDir);    // scaling curves
 
 // Phase 4: scale and characterization.
 CaseResult runTimestepEnvelope(const std::string& outDir);  // largest accurate substep
+CaseResult runTimestepConvergence(const std::string& outDir);  // refinement in time
 CaseResult runThroughput(const std::string& outDir);        // batched CPU segment-substeps/s
 
 // Applications: a real task swept on the GPU, checked against theory and the CPU.

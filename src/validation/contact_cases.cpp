@@ -277,113 +277,124 @@ CaseResult runIncline(const std::string& outDir) {
 // Measurement: above the critical ratio the rope slides at a terminal speed
 // proportional to the excess tension, so the critical ratio is where that speed
 // extrapolates to zero.
+namespace {
+
+// The critical tension ratio of a rope wrapped `turns` around a cylinder with
+// friction mu, located as the zero of terminal slide speed. Every run is written
+// to csv.
+double capstanCriticalRatio(double turns, Real mu, Csv& csv) {
+    const RodMaterial mat = ropeMaterial();
+    const Real R = Real(0.05);       // cylinder radius
+    const Real T1 = Real(1);         // held tension
+    const Real lead = Real(0.03);    // straight lead-in / lead-out
+    const Real segLen = Real(1e-3);
+    const double theta = 2 * kPi * turns;
+    const double capstanRatio = std::exp(double(mu) * theta);
+
+    // Centerline: straight lead-in, the wrap at radius R + r, straight
+    // lead-out, all in the z = 0 plane around a cylinder along z.
+    const Real Rc = R + mat.radius;
+    std::vector<Vec3> pts;
+    auto arcPoint = [&](double phi) {
+        return Vec3(Rc * std::cos(phi), Rc * std::sin(phi), 0);
+    };
+    auto tangent = [&](double phi) {
+        return Vec3(-std::sin(phi), std::cos(phi), 0);
+    };
+
+    const int leadN = std::max(2, int(lead / segLen));
+    for (int i = leadN; i >= 1; --i)
+        pts.push_back(arcPoint(0) - tangent(0) * (segLen * i));
+    const int arcN = std::max(4, int(Rc * theta / segLen));
+    for (int i = 0; i <= arcN; ++i) pts.push_back(arcPoint(theta * i / arcN));
+    for (int i = 1; i <= leadN; ++i)
+        pts.push_back(arcPoint(theta) + tangent(theta) * (segLen * i));
+
+    const Vec3 pullIn = -tangent(0);           // direction the held end is pulled
+    const Vec3 pullOut = tangent(theta);       // direction the loaded end is pulled
+
+    CollisionWorld world;
+    world.primitives.push_back(
+        Primitive::makeCapsule(Vec3(0, 0, -1), Vec3(0, 0, 1), R, mu));
+
+    std::vector<double> allRatios, allSpeeds;
+    // Bracket the threshold from both sides; below it the rope holds and
+    // those points are dropped from the fit.
+    for (int k = 0; k <= 9; ++k) {
+        const double ratio = capstanRatio * (0.70 + 0.12 * k);
+
+        Rod rod = makeRodFromCenterline(pts, mat, Vec3(0, 0, 1));
+        // The rope is built already wrapped, but it is a STRAIGHT rope: its
+        // unstressed shape has no curvature, so clear the rest curvature the
+        // builder inferred from the initial pose.
+        for (std::size_t i = 0; i < rod.bend.size(); ++i) rod.bend.restDarboux[i] = Vec3();
+
+        rod.state.extForce.front() = pullIn * T1;
+        rod.state.extForce.back() = pullOut * Real(T1 * ratio);
+
+        SolverParams p;
+        p.dt = Real(5e-4);
+        p.substeps = std::min(64, std::max(8, stableSubsteps(rod, Vec3(), p.dt)));
+        p.iterations = 6;
+        p.gravity = Vec3();
+        // Light damping so the elastic ringing of the lead-ins dies away and
+        // sliding reaches a terminal speed proportional to the excess pull.
+        p.linearDamping = Real(40);
+        p.angularDamping = Real(40);
+
+        SolverContext ctx;
+        const int settleSteps = 400, measureSteps = 400;
+        for (int i = 0; i < settleSteps; ++i) step(rod, p, world, ctx);
+
+        // Slip is motion along the rope, so measure it along the surface
+        // tangent at the middle of the wrap, signed towards the pulled end.
+        const Vec3 midTangent(-std::sin(theta / 2), std::cos(theta / 2), 0);
+        const int mid = int(pts.size()) / 2;
+        const Vec3 before = rod.state.x[mid];
+        for (int i = 0; i < measureSteps; ++i) step(rod, p, world, ctx);
+        const double speed =
+            dot(rod.state.x[mid] - before, midTangent) / (measureSteps * double(p.dt));
+
+        csv.row(turns, mu, theta, ratio, speed, p.substeps, capstanRatio);
+        allRatios.push_back(ratio);
+        allSpeeds.push_back(speed);
+    }
+
+    // Keep only the points that are genuinely sliding. Below the threshold
+    // the rope is not motionless: it creeps at ~1e-4 m/s while its lead-ins
+    // settle elastically, and an absolute cutoff at that level let three
+    // creeping points into a one-turn fit -- which dragged the intercept
+    // from 4.80 to 4.15 and made correct friction look 14% weak. Sliding
+    // speeds are tens of times larger, so a cutoff relative to the fastest
+    // point separates the two regimes cleanly at every wrap angle.
+    const double fastest = *std::max_element(allSpeeds.begin(), allSpeeds.end());
+    std::vector<double> ratios, speeds;
+    for (std::size_t i = 0; i < allSpeeds.size(); ++i) {
+        if (allSpeeds[i] > 0.05 * fastest) {
+            ratios.push_back(allRatios[i]);
+            speeds.push_back(allSpeeds[i]);
+        }
+    }
+
+    return zeroCrossing(ratios, speeds);
+}
+
+const char* const kCapstanHeader =
+    "wrap_turns,mu,theta,ratio,terminal_speed,substeps,capstan_ratio";
+
+}  // namespace
+
 CaseResult runCapstan(const std::string& outDir) {
     CaseResult res;
     res.name = "capstan equation (friction and contact together)";
 
-    const RodMaterial mat = ropeMaterial();
-    const Real R = Real(0.05);       // cylinder radius
     const Real mu = Real(0.25);
-    const Real T1 = Real(1);         // held tension
-    const Real lead = Real(0.03);    // straight lead-in / lead-out
-    const Real segLen = Real(1e-3);
-
-    Csv csv(outDir, "capstan.csv", "wrap_turns,theta,ratio,terminal_speed,substeps,"
-                                   "capstan_ratio");
-
+    Csv csv(outDir, "capstan.csv", kCapstanHeader);
     const std::vector<double> wraps = {0.25, 0.5, 0.75, 1.0};  // in turns
     double worst = 0;
-
     for (double turns : wraps) {
-        const double theta = 2 * kPi * turns;
-        const double capstanRatio = std::exp(mu * theta);
-
-        // Centerline: straight lead-in, the wrap at radius R + r, straight
-        // lead-out, all in the z = 0 plane around a cylinder along z.
-        const Real Rc = R + mat.radius;
-        std::vector<Vec3> pts;
-        auto arcPoint = [&](double phi) {
-            return Vec3(Rc * std::cos(phi), Rc * std::sin(phi), 0);
-        };
-        auto tangent = [&](double phi) {
-            return Vec3(-std::sin(phi), std::cos(phi), 0);
-        };
-
-        const int leadN = std::max(2, int(lead / segLen));
-        for (int i = leadN; i >= 1; --i)
-            pts.push_back(arcPoint(0) - tangent(0) * (segLen * i));
-        const int arcN = std::max(4, int(Rc * theta / segLen));
-        for (int i = 0; i <= arcN; ++i) pts.push_back(arcPoint(theta * i / arcN));
-        for (int i = 1; i <= leadN; ++i)
-            pts.push_back(arcPoint(theta) + tangent(theta) * (segLen * i));
-
-        const Vec3 pullIn = -tangent(0);           // direction the held end is pulled
-        const Vec3 pullOut = tangent(theta);       // direction the loaded end is pulled
-
-        CollisionWorld world;
-        world.primitives.push_back(
-            Primitive::makeCapsule(Vec3(0, 0, -1), Vec3(0, 0, 1), R, mu));
-
-        std::vector<double> allRatios, allSpeeds;
-        // Bracket the threshold from both sides; below it the rope holds and
-        // those points are dropped from the fit.
-        for (int k = 0; k <= 9; ++k) {
-            const double ratio = capstanRatio * (0.70 + 0.12 * k);
-
-            Rod rod = makeRodFromCenterline(pts, mat, Vec3(0, 0, 1));
-            // The rope is built already wrapped, but it is a STRAIGHT rope: its
-            // unstressed shape has no curvature, so clear the rest curvature the
-            // builder inferred from the initial pose.
-            for (std::size_t i = 0; i < rod.bend.size(); ++i) rod.bend.restDarboux[i] = Vec3();
-
-            rod.state.extForce.front() = pullIn * T1;
-            rod.state.extForce.back() = pullOut * Real(T1 * ratio);
-
-            SolverParams p;
-            p.dt = Real(5e-4);
-            p.substeps = std::min(64, std::max(8, stableSubsteps(rod, Vec3(), p.dt)));
-            p.iterations = 6;
-            p.gravity = Vec3();
-            // Light damping so the elastic ringing of the lead-ins dies away and
-            // sliding reaches a terminal speed proportional to the excess pull.
-            p.linearDamping = Real(40);
-            p.angularDamping = Real(40);
-
-            SolverContext ctx;
-            const int settleSteps = 400, measureSteps = 400;
-            for (int i = 0; i < settleSteps; ++i) step(rod, p, world, ctx);
-
-            // Slip is motion along the rope, so measure it along the surface
-            // tangent at the middle of the wrap, signed towards the pulled end.
-            const Vec3 midTangent(-std::sin(theta / 2), std::cos(theta / 2), 0);
-            const int mid = int(pts.size()) / 2;
-            const Vec3 before = rod.state.x[mid];
-            for (int i = 0; i < measureSteps; ++i) step(rod, p, world, ctx);
-            const double speed =
-                dot(rod.state.x[mid] - before, midTangent) / (measureSteps * double(p.dt));
-
-            csv.row(turns, theta, ratio, speed, p.substeps, capstanRatio);
-            allRatios.push_back(ratio);
-            allSpeeds.push_back(speed);
-        }
-
-        // Keep only the points that are genuinely sliding. Below the threshold
-        // the rope is not motionless: it creeps at ~1e-4 m/s while its lead-ins
-        // settle elastically, and an absolute cutoff at that level let three
-        // creeping points into a one-turn fit -- which dragged the intercept
-        // from 4.80 to 4.15 and made correct friction look 14% weak. Sliding
-        // speeds are tens of times larger, so a cutoff relative to the fastest
-        // point separates the two regimes cleanly at every wrap angle.
-        const double fastest = *std::max_element(allSpeeds.begin(), allSpeeds.end());
-        std::vector<double> ratios, speeds;
-        for (std::size_t i = 0; i < allSpeeds.size(); ++i) {
-            if (allSpeeds[i] > 0.05 * fastest) {
-                ratios.push_back(allRatios[i]);
-                speeds.push_back(allSpeeds[i]);
-            }
-        }
-
-        const double measured = zeroCrossing(ratios, speeds);
+        const double capstanRatio = std::exp(double(mu) * 2 * kPi * turns);
+        const double measured = capstanCriticalRatio(turns, mu, csv);
         const double err = std::abs(measured - capstanRatio) / capstanRatio;
         worst = std::max(worst, err);
         res.notes.push_back(fmt("  %.2f turns: critical ratio %.4f measured vs exp(mu theta) = "
@@ -392,6 +403,31 @@ CaseResult runCapstan(const std::string& outDir) {
 
     res.notes.push_back(fmt("  mu = %.2f, worst relative error %.3g", double(mu), worst));
     res.checks.push_back(makeCheck("capstan ratio across wrap angles", worst, 0.0, 0.06, 1.0));
+    return res;
+}
+
+// The same measurement across friction coefficients at half a turn. The
+// exponent is mu theta, so a friction model that is right at one coefficient
+// but scales wrongly with mu -- a normal force that saturates, a friction cone
+// clipped per iteration -- shows up here and not in the wrap sweep.
+CaseResult runCapstanFrictionSweep(const std::string& outDir) {
+    CaseResult res;
+    res.name = "capstan equation across friction coefficients (half a turn)";
+
+    Csv csv(outDir, "capstan_mu.csv", kCapstanHeader);
+    const double turns = 0.5;
+    double worst = 0;
+    for (Real mu : {Real(0.1), Real(0.25), Real(0.5), Real(0.75)}) {
+        const double capstanRatio = std::exp(double(mu) * 2 * kPi * turns);
+        const double measured = capstanCriticalRatio(turns, mu, csv);
+        const double err = std::abs(measured - capstanRatio) / capstanRatio;
+        worst = std::max(worst, err);
+        res.notes.push_back(fmt("  mu = %.2f: critical ratio %.4f measured vs exp(mu pi) = %.4f",
+                                double(mu), measured, capstanRatio));
+    }
+    res.notes.push_back(fmt("  worst relative error %.3g", worst));
+    res.checks.push_back(
+        makeCheck("capstan ratio across friction coefficients", worst, 0.0, 0.06, 1.0));
     return res;
 }
 
