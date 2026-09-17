@@ -289,21 +289,39 @@ struct ElasticaRef {
     double tipX = 0, tipZ = 0, tipAngle = 0;
 };
 
-ElasticaRef solveElasticaRef(double P, double L, double EI, int steps = 20000) {
+//
+// With EA and kGA given (0 = rigid), it is Reissner's extensible, shearable
+// elastica instead -- the continuum the Cosserat rod actually discretizes. The
+// internal force is the tip load throughout, so the axial strain is
+// P sin(theta) / EA and the shear strain -P cos(theta) / kGA, the centreline
+// tangent is r' = (1 + eps) t + gamma n with t = (cos, -sin), n = (sin, cos),
+// and moment balance reads EI theta'' = -P x'.
+ElasticaRef solveElasticaRef(double P, double L, double EI, double EA = 0, double kGA = 0,
+                             int steps = 20000) {
     const double a = P / EI;
+    auto dxds = [&](double th) {
+        const double eps = EA > 0 ? P * std::sin(th) / EA : 0.0;
+        const double gamma = kGA > 0 ? -P * std::cos(th) / kGA : 0.0;
+        return (1 + eps) * std::cos(th) + gamma * std::sin(th);
+    };
+    auto dzds = [&](double th) {
+        const double eps = EA > 0 ? P * std::sin(th) / EA : 0.0;
+        const double gamma = kGA > 0 ? -P * std::cos(th) / kGA : 0.0;
+        return -(1 + eps) * std::sin(th) + gamma * std::cos(th);
+    };
     auto shoot = [&](double kappa0, ElasticaRef* out) {
         const double ds = L / steps;
         double th = 0, dth = kappa0, x = 0, z = 0;
         for (int i = 0; i < steps; ++i) {
-            // RK4 on (theta, theta') with theta'' = -a cos(theta).
-            const double k1t = dth, k1d = -a * std::cos(th);
-            const double k2t = dth + 0.5 * ds * k1d, k2d = -a * std::cos(th + 0.5 * ds * k1t);
-            const double k3t = dth + 0.5 * ds * k2d, k3d = -a * std::cos(th + 0.5 * ds * k2t);
-            const double k4t = dth + ds * k3d, k4d = -a * std::cos(th + ds * k3t);
+            // RK4 on (theta, theta') with theta'' = -a x'(theta).
+            const double k1t = dth, k1d = -a * dxds(th);
+            const double k2t = dth + 0.5 * ds * k1d, k2d = -a * dxds(th + 0.5 * ds * k1t);
+            const double k3t = dth + 0.5 * ds * k2d, k3d = -a * dxds(th + 0.5 * ds * k2t);
+            const double k4t = dth + ds * k3d, k4d = -a * dxds(th + ds * k3t);
             // Trapezoid the tangent over the same interval for x and z.
             const double thNext = th + ds * (k1t + 2 * k2t + 2 * k3t + k4t) / 6.0;
-            x += 0.5 * ds * (std::cos(th) + std::cos(thNext));
-            z -= 0.5 * ds * (std::sin(th) + std::sin(thNext));
+            x += 0.5 * ds * (dxds(th) + dxds(thNext));
+            z += 0.5 * ds * (dzds(th) + dzds(thNext));
             dth += ds * (k1d + 2 * k2d + 2 * k3d + k4d) / 6.0;
             th = thNext;
         }
@@ -371,6 +389,46 @@ CaseResult runElasticaTipLoad(const std::string& outDir) {
     res.notes.push_back(fmt("  n=%.0f, worst tip position error %.3g L over alpha in [0.5, 5]",
                             double(n), worst));
     res.checks.push_back(makeCheck("tip position vs exact elastica", worst, 0.0, 0.005, 1.0));
+
+    // Mesh refinement: the worst error over the same loads, n = 8 .. 256,
+    // against both references.
+    const double EA = double(mat.youngs * mat.area());
+    const double kGA = double(mat.shearCorrection() * mat.shear() * mat.area());
+    Csv conv(outDir, "elastica_tipload_convergence.csv",
+             "segments,h,worst_err_inextensible,worst_err_extensible");
+    std::vector<double> hs, errs, errsExt;
+    for (int segments : {8, 16, 32, 64, 128, 256}) {
+        double w = 0, wExt = 0;
+        for (double alpha : alphas) {
+            const Real P = Real(alpha) * EI / (L * L);
+            Rod rod = makeStraightRod(segments, L, mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
+            clampRootExact(rod);
+            rod.state.extForce.back() = Vec3(0, 0, -P);
+            solveStatic(rod);
+            const Vec3 tip = rod.state.x.back();
+            auto dist = [&](const ElasticaRef& ref) {
+                const double dx = tip.x - ref.tipX, dz = tip.z - ref.tipZ;
+                return std::sqrt(dx * dx + dz * dz) / L;
+            };
+            w = std::max(w, dist(solveElasticaRef(P, L, EI)));
+            wExt = std::max(wExt, dist(solveElasticaRef(P, L, EI, EA, kGA)));
+        }
+        hs.push_back(L / segments);
+        errs.push_back(w);
+        errsExt.push_back(wExt);
+        conv.row(segments, L / segments, w, wExt);
+        res.notes.push_back(fmt("  n=%.0f: worst tip error %.3g L (inextensible), %.3g L (extensible)",
+                                double(segments), w, wExt));
+    }
+    // Against the inextensible elastica the error stops falling near 6e-5 L:
+    // the rod stretches and shears by ~P/EA, which that reference leaves out.
+    // Against Reissner's extensible elastica it keeps converging.
+    const double slopeExt = logLogSlope(hs, errsExt);
+    res.notes.push_back(fmt("  slope %.2f vs inextensible (floored by axial and shear strain), "
+                            "%.2f vs extensible", logLogSlope(hs, errs), slopeExt));
+    res.checks.push_back(
+        makeCheck("tip vs extensible elastica (n = 256)", errsExt.back(), 0.0, 2e-5, 1.0));
+    res.checks.push_back(makeRangeCheck("convergence order vs extensible elastica", slopeExt, 1.8, 2.2));
     return res;
 }
 

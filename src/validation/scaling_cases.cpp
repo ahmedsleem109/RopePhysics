@@ -180,6 +180,143 @@ CaseResult runTimestepEnvelope(const std::string& outDir) {
     return res;
 }
 
+// ---------------------------------------------------- timestep across motions
+namespace {
+
+enum class Motion { kSwing, kDrop, kWhip };
+
+const char* motionName(Motion m) {
+    switch (m) {
+        case Motion::kSwing: return "swing";
+        case Motion::kDrop: return "drop";
+        default: return "whip";
+    }
+}
+
+struct MotionRun {
+    double worstStrain = 0;
+    double peakSpeed = 0;
+};
+
+// One second of a motion at substep h (one sweep per substep), 32 segments.
+//   swing  the envelope's cantilever, released from horizontal;
+//   drop   a free rod falling 0.5 m, tilted 20 degrees, onto a plane with
+//          friction: one end lands first and the rest slaps down after it;
+//   whip   a rod pinned at one end, that end shaken vertically at 4 Hz with
+//          5 cm amplitude under gravity.
+MotionRun runMotion(Motion motion, double youngs, double h) {
+    RodMaterial mat = referenceMaterial();
+    mat.youngs = Real(youngs);
+    const int n = 32;
+    CollisionWorld world;
+    Rod rod;
+    if (motion == Motion::kDrop) {
+        const Real tilt = Real(20.0 * kPi / 180.0);
+        rod = makeStraightRod(n, Real(1), mat, Vec3(0, 0, Real(0.5)),
+                              Vec3(std::cos(tilt), 0, std::sin(tilt)));
+        world.primitives.push_back(Primitive::makePlane(Vec3(), Vec3(0, 0, 1), Real(0.3)));
+    } else {
+        rod = makeStraightRod(n, Real(1), mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
+        if (motion == Motion::kSwing)
+            clampRootExact(rod);
+        else
+            rod.pinParticle(0);
+    }
+
+    SolverParams p;
+    p.dt = Real(h);
+    p.substeps = 1;
+    p.iterations = 1;
+    p.gravity = Vec3(0, 0, Real(-9.81));
+    SolverContext ctx;
+
+    const double amplitude = 0.05, omega = 2 * kPi * 4.0;
+    MotionRun out;
+    const int steps = int(std::ceil(1.0 / h));
+    for (int i = 0; i < steps; ++i) {
+        if (motion == Motion::kWhip)
+            rod.state.kinematicVelocity.front() =
+                Vec3(0, 0, Real(amplitude * omega * std::cos(omega * (i + 0.5) * h)));
+        step(rod, p, world, ctx);
+        for (std::size_t k = 0; k < rod.stretch.size(); ++k) {
+            const Vec3 d = rod.state.x[rod.stretch.p1[k]] - rod.state.x[rod.stretch.p0[k]];
+            const Vec3 u = rotateInv(rod.state.q[rod.stretch.seg[k]], d) / rod.stretch.restLength[k];
+            out.worstStrain = std::max(out.worstStrain, double(norm(u - Vec3(0, 0, 1))));
+        }
+        for (const Vec3& v : rod.state.v) out.peakSpeed = std::max(out.peakSpeed, double(norm(v)));
+        if (!(out.worstStrain < 1.0)) {
+            out.worstStrain = 1e9;
+            return out;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+// The envelope measured on one motion, a gravity swing, found the accuracy limit
+// is kinematic: a few percent of an element moved per substep. This asks whether
+// that holds for motions that are not a swing -- contact (a tilted rod landing
+// on the floor) and a whip (one end shaken) -- by finding the largest accurate
+// substep for each and stating the limit in each run's own peak particle speed:
+// v_peak h / l. The swing's v = sqrt(2 g L) in the envelope is replaced by the
+// measured speed, so the three are comparable.
+CaseResult runTimestepMotions(const std::string& outDir) {
+    CaseResult res;
+    res.name = "timestep envelope across motions (swing, drop onto floor, whip)";
+
+    Csv csv(outDir, "timestep_motions.csv",
+            "motion,youngs,segments,max_substep,peak_speed,elements_per_substep,worst_strain");
+    std::vector<double> motionPerSubstep;
+    bool allMeasured = true;
+    for (Motion m : {Motion::kSwing, Motion::kDrop, Motion::kWhip}) {
+        // An impact at speed v strains a rod by about v / c, c = sqrt(E / rho):
+        // 1% for this 3 m/s landing at E = 1e8, over tolerance at any timestep.
+        // The drop therefore uses stiffer rods, where that strain is 0.3% and 0.1%.
+        const std::vector<double> stiffness =
+            m == Motion::kDrop ? std::vector<double>{1e9, 1e10} : std::vector<double>{1e8, 1e9};
+        for (double E : stiffness) {
+            // Geometric bisection on h, as largestAccurateSubstep.
+            double lo = 2e-6, hi = 2e-3;
+            auto ok = [&](double h) { return runMotion(m, E, h).worstStrain <= kStrainTol; };
+            if (!ok(lo) || ok(hi)) {
+                // Say which: a physical strain above tolerance, or no limit found.
+                res.notes.push_back(std::string("  ") + motionName(m) +
+                                    fmt(", E = %.0e: not bracketed (worst strain %.3g at h = 2e-6 s)",
+                                        E, runMotion(m, E, lo).worstStrain));
+                allMeasured = false;
+                continue;
+            }
+            while (hi / lo > 1.02) {
+                const double mid = std::sqrt(lo * hi);
+                (ok(mid) ? lo : hi) = mid;
+            }
+            const MotionRun run = runMotion(m, E, lo);
+            const double elements = run.peakSpeed * lo * 32;
+            motionPerSubstep.push_back(elements);
+            csv.row(motionName(m), E, 32, lo, run.peakSpeed, elements, run.worstStrain);
+            res.notes.push_back(std::string("  ") + motionName(m) +
+                                fmt(", E = %.0e: largest accurate substep %.3g s", E, lo) +
+                                fmt(", peak speed %.3g m/s, %.3g elements per substep",
+                                    run.peakSpeed, elements));
+        }
+    }
+    res.checks.push_back(
+        makeCheck("every motion bracketed", allMeasured ? 1.0 : 0.0, 1.0, 0.0));
+    if (motionPerSubstep.empty()) return res;
+    const double lo = *std::min_element(motionPerSubstep.begin(), motionPerSubstep.end());
+    const double hi = *std::max_element(motionPerSubstep.begin(), motionPerSubstep.end());
+    res.notes.push_back(fmt("  across motions: %.3g to %.3g elements per substep (%.2gx spread)", lo,
+                            hi, spread(motionPerSubstep)));
+    // Contact inflates the drop's peak speed well past its 3.1 m/s landing
+    // speed; measured against the landing speed its limit is 3-5x tighter.
+    res.notes.push_back("  (the drop's peak speed is set by contact resolution, not the fall)");
+    res.checks.push_back(
+        makeRangeCheck("slowest limit is at least half a percent of an element", lo, 0.005, 0.1));
+    res.checks.push_back(makeRangeCheck("fastest limit is under a tenth of an element", hi, 0.005, 0.1));
+    return res;
+}
+
 // --------------------------------------------------------- timestep convergence
 //
 // Mesh refinement is established elsewhere; this is its counterpart in time.

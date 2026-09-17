@@ -66,6 +66,7 @@ CaseResult runGpuThroughput(const std::string& outDir);    // scaling curves
 // Phase 4: scale and characterization.
 CaseResult runTimestepEnvelope(const std::string& outDir);  // largest accurate substep
 CaseResult runTimestepConvergence(const std::string& outDir);  // refinement in time
+CaseResult runTimestepMotions(const std::string& outDir);  // envelope beyond the swing
 CaseResult runThroughput(const std::string& outDir);        // batched CPU segment-substeps/s
 
 // Applications: a real task swept on the GPU, checked against theory and the CPU.

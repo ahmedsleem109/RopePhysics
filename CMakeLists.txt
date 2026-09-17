@@ -67,6 +67,8 @@ endif()
 # not validation cases themselves.
 add_executable(rodexp tools/experiments/stability_probe.cpp)
 target_link_libraries(rodexp PRIVATE crs_core)
+add_executable(rodtwist tools/experiments/twist_window.cpp)
+target_link_libraries(rodtwist PRIVATE crs_core)
 
 enable_testing()
 add_test(NAME validation COMMAND rodsim all --out ${CMAKE_SOURCE_DIR}/docs/data)

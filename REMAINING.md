@@ -142,12 +142,13 @@ compile; they have never executed.
       will go red on the two stability cases until they are redesigned.
       Consider shortening twist buckling / capstan for per-commit runs.
 - [x] Timestep-refinement convergence study (`timestep-convergence`: first order).
-- [ ] Extend mesh sweeps: cantilever (now n = 256) and moment (now n = 128)
-      done; tip-load and twist buckling still at n = 32. Twist buckling converges at slope 0.82 (first
+- [ ] Extend mesh sweeps: cantilever (n = 256), moment (n = 128) and tip load
+      (n = 256, slope 1.96 vs Reissner's extensible elastica) done; twist buckling
+      still at n = 32. Twist buckling converges at slope 0.82 (first
       order) — explain or improve.
-- [ ] Stability rule measured on one scenario only (gravity cantilever), and it
-      does not hold once elements are shorter than the rod diameter. Test other
-      scenarios (contact-driven motion, whipping) and the short-element regime.
+- [x] Stability rule across motions (`timestep-motions`: swing, drop, whip; 1-6%
+      of an element per substep; contact 3-5x tighter by landing speed).
+- [ ] The short-element regime (elements shorter than the rod diameter).
 - [x] Capstan μ sweep (`capstan-mu`, μ = 0.1–0.75 at half a turn, worst 0.71%).
       The incline is still one geometry.
 - [ ] Contacts apply no torque to material frames (no rolling/torsional

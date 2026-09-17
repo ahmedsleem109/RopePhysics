@@ -117,14 +117,14 @@ segments are halved in length, as the theory says it should.
 |---|---|---|
 | Cantilever bending under a tip load | Timoshenko beam theory | error **7.6e-6** at 256 segments, slope **2.00**; same on any axis |
 | Rod bent into a circle by an end moment | exact circle, radius `EI/M` | error **1e-4** at 128 segments, slope **2.01** |
-| Large bending under a tip load | exact elastica | tip within **0.06%** of rod length |
+| Large bending under a tip load | exact elastica | tip within **0.06%** of rod length; converges at slope **1.96** to the extensible elastica |
 | Rod with built-in curvature and twist | exact helix | radius to **2e-10**, pitch to **5e-4** |
 | Twisted rod buckling | Michell/Greenhill threshold | **2.3%** at 32 segments, converging |
 | Resting on plane, sphere, capsule, box | exact geometry | **2e-16** |
 | Block on a slope | slips at `tan α = μ` | within **1.5%** |
 | Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn; **0.7%** for μ = 0.1 to 0.75 |
 | Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
-| Timestep accuracy (swinging cantilever) | strain error under 1% | limit at **1–3%** of a segment moved per substep |
+| Timestep accuracy (swing, drop onto floor, whip) | strain error under 1% | limit at **1–6%** of a segment moved per substep |
 | Timestep refinement (swinging cantilever) | self-convergence | first order, observed **1.00**; error 1e-3 of the motion at 1/4 ms |
 | Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
 | GPU vs CPU, with loads and a driven twist | same trajectory | **5e-8 m** after one step; drift matches float rounding |
