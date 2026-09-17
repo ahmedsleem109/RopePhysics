@@ -532,7 +532,9 @@ CaseResult runGpuParity(const std::string& outDir) {
                                 "later", selfError, drift50));
         res.checks.push_back(makeRangeCheck("self-collision restart made contact",
                                             double(selfAtRestart), 5.0, 1e9));
-        const double selfTol = 5e-5;
+        // Measured one-step errors are 1.5e-6 to 2.3e-6 m; the tolerance leaves
+        // a 10x margin over them and stays an order below the effect (4e-4 m).
+        const double selfTol = 3e-5;
         res.checks.push_back(makeCheck("self-collision: GPU matches CPU after one step", selfError,
                                        0.0, selfTol, 1.0));
         res.checks.push_back(makeRangeCheck("self-collision effect is 10x the tolerance",

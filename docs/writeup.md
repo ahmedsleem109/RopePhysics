@@ -282,11 +282,11 @@ exclusion now spans a diameter of rest length.
 
 | case | reference | result |
 |---|---|---|
-| primitives | exact rest height on plane, sphere, capsule, box | 2.2e-16; penetration 5e-17 m |
-| incline | slip at `tan α = μ`; `a = g(sin α − μ cos α)` | slip angle within 1.5%, sliding μ within 1.7% |
+| primitives | exact rest height on plane, sphere, capsule, box | 9.6e-15; penetration 0 m |
+| incline | slip at `tan α = μ`; `a = g(sin α − μ cos α)` | slip angle within 0.45%, sliding μ within 6e-10 |
 | capstan | `T₂/T₁ = e^{μθ}` at slip | 1.6%, 0.6%, 0.3%, 0.3% at ¼, ½, ¾, 1 turn (μ = 0.25) |
 | capstan across μ | `e^{μπ}` at half a turn | worst 0.71% over μ = 0.1, 0.25, 0.5, 0.75 (ratio 1.37 to 10.6) |
-| self-collision | no interpenetration during sustained contact | 13 simultaneous self-contacts; overlap 0.18% of diameter |
+| self-collision | no interpenetration during sustained contact | 13 simultaneous self-contacts; overlap 0.05% of diameter |
 
 **The capstan** is the sharpest test here, because the answer is exponential in
 both friction and wrap angle. Two things went wrong with it before it worked. At
@@ -433,10 +433,11 @@ The first parity scenario for this was wrong in an instructive way. It started
 the rod 1 mm *inside* the floor, and the first position correction launched it
 upward at 8 m/s, so it barely touched anything again. The scenario now lets the
 rod settle onto a floor 0.1 mm below and a sphere under its middle, with
-friction. From about step 5 it rests in persistent contacts, up to 106 at 128
-segments. After 200 steps the GPU sits 1.2–1.6e-7 m from the CPU, which is
-exactly the float-vs-double envelope measured for that scenario. By step 50,
-contact has moved the rod 1.3 cm, and the GPU error there is 1.3e-5 of that.
+friction. From about step 5 it rests in persistent contacts, up to 131 at 128
+segments. After 200 steps the GPU sits 2–3e-8 m from the CPU, inside the
+float-vs-double envelope for that scenario. By step 50, contact has moved the
+rod 1.3 cm, and the GPU error there is 2.3e-6 of that. (Before the contact
+margin these were 1.2–1.6e-7 m and 1.3e-5.)
 Contacts against two primitives cost 20% of fused throughput (0.92 B vs 1.15 B
 at 16 384 × 64).
 
@@ -489,12 +490,12 @@ it holds while `long/short ≤ e^{μπ}`. `src/apps/cable_hanging.h` defines the
 once, and it is used by the GPU sweep, its CPU cross-check and the demo scene.
 
 **Sweep.** 30 friction values × 60 leg ratios × two cables (E = 1 and 3 MPa),
-8 s each, takes 107 s on the laptop GPU. There is one batch per friction value,
-because friction belongs to the world a batch shares. The soft cable's boundary
-follows `μ = ln(ratio)/π` with a median offset of 0.033, always on the safe side:
-the closest point sits 0.021 below theory, and none is above it. The stiffer
-cable holds in 64% as many placements. Beyond a leg ratio of about 2.3 it holds
-at no friction up to 0.6: bending stiffness, which the formula ignores, dominates.
+8 s each, takes 120 s on the laptop GPU. The soft cable's boundary follows
+`μ = ln(ratio)/π` on the safe side, with a median offset of 0.059: every
+boundary point needs at least 0.018 more friction than the ideal rope, and
+none holds where the ideal rope slips. The stiffer cable holds in 87% as many
+placements. Beyond a leg ratio of about 2.9 it holds at no friction up to 0.6:
+bending stiffness, which the formula ignores, dominates.
 
 ![Cable hanging](figs/cable_hanging.png)
 
@@ -511,14 +512,28 @@ same work) the margin is 2.6×, and float, double and theory agree. The case
 asserts the margin and cross-checks the GPU against the CPU on exactly those
 near-boundary placements.
 
-*Friction creeps.* A 3 s window then matched theory to 0.006, but only because it
+*Friction crept.* A 3 s window then matched theory to 0.006, but only because it
 stopped watching. Rendering the demo caught it: μ = 0.25 on a 2:1 drape held at
-3 s and was on the floor by 4 s. Even at μ = 0.5 a draped cable creeps about
-2 mm/s, and μ = 0.28 held for 8 s and fell by 12 s. With an 8 s window the boundary
-sits 0.03 above theory. Hold/slip is therefore stated for that window, and the
-check requires the simulator never to be more optimistic than the ideal rope.
-The likely cause is per-particle contact: a rope over a bar rests on a few
-points, and which points touch keeps changing.
+3 s and was on the floor by 4 s, and even at μ = 0.5 a draped cable crept
+1.6 mm/s. The cause was contact generation, not per-particle contact as first
+guessed (`tools/experiments/creep_probe.cpp`). Contacts are built from the
+positions a substep starts at, and only for particles inside a surface. The
+last projection leaves a resting particle exactly on the surface, so for the
+next substep it had no contact and no friction, and slid under the tangential
+part of gravity before the substep after caught it. Contacts are now generated
+within a quarter radius of the surface (`CollisionWorld::contactMarginRadii`,
+CPU and GPU). The unilateral clamp means a contact that is not touching does
+nothing. The creep at μ = 0.5 went to zero (−0.01 mm/s, settling). The incline
+slip angle improved from 1.5% to 0.45%, and the capstan did not move.
+
+What the fix exposed is that the boundary near theory is limited by the
+substep. At 8 substeps × 2 sweeps, with the GPU's colour-ordered constraints, a
+1.6:1 drape at μ = 0.20 slides in double precision on the CPU as well. More
+sweeps do not change that; 32 substeps hold it. The old, apparently closer
+median (0.033) leaned on two artifacts: cables at low friction held partly by
+float rounding (see above), and at high friction slid by creep. More substeps
+would need more than single precision can resolve at this scale, so the sweep
+states its boundary at 8 substeps, on the safe side.
 
 ---
 
@@ -550,11 +565,11 @@ It then refits a Gaussian to the top 10%. Run as `rodsim harness-learning`:
 
 | iteration | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| attempts routed | 2% | 9% | 26% | 40% | 59% | 73% | 81% | 81% | 79% | 86% |
+| attempts routed | 2% | 6% | 15% | 32% | 50% | 71% | 77% | 80% | 80% | 85% |
 
 Each iteration simulates 1024 × 6.3 s of cable (120 segments, 4 substeps × 4
-sweeps, five contact primitives) in 12.6 s on a laptop RTX 3060. Ten take
-127 s. The per-iteration rate includes the sampling noise. The final mean
+sweeps, five contact primitives) in about 13 s on a laptop RTX 3060. Ten take
+129 s. The per-iteration rate includes the sampling noise. The final mean
 motion routes **1024 of 1024 fresh random cables**. The hand-written motion
 routes **0 of the same 1024**. On the reference cable it leaves a slack loop past peg A.
 

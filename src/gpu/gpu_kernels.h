@@ -56,6 +56,7 @@ struct DevRodF {
     const Primitivef* prims = nullptr;
     int numPrims = 0;
     float radius = 0;
+    float contactMargin = 0;  // world.contactMarginRadii * radius
 
     // Self-collision, as generateContacts does it on the CPU. The index gap and
     // table size come from the host (selfCollisionIndexGap, world.hashTableSize).
