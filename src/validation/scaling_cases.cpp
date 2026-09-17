@@ -180,6 +180,83 @@ CaseResult runTimestepEnvelope(const std::string& outDir) {
     return res;
 }
 
+// --------------------------------------------------------- timestep convergence
+//
+// Mesh refinement is established elsewhere; this is its counterpart in time.
+// The same swinging cantilever as the envelope probe, simulated for a quarter
+// of a second with one sweep per substep, the substep halved from 1/4 ms to
+// 1/1024 ms. There is no closed-form trajectory, so convergence is measured
+// against itself: d_k is the largest particle distance between the runs at h_k
+// and h_k / 2, and the observed order is log2(d_k / d_{k+1}).
+//
+// Checked: the trajectory converges (every refinement moves it less than the
+// last) at a consistent order, and the error that remains at the substep the
+// envelope calls accurate is small next to the motion itself.
+CaseResult runTimestepConvergence(const std::string& outDir) {
+    CaseResult res;
+    res.name = "timestep convergence (swinging cantilever, substep halved 8 times)";
+
+    RodMaterial mat = referenceMaterial();
+    const int n = 16;
+    const double duration = 0.25, dt = 1e-3;
+
+    auto simulate = [&](int substeps) {
+        Rod rod = makeStraightRod(n, Real(1), mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
+        clampRootExact(rod);
+        SolverParams p;
+        p.dt = Real(dt);
+        p.substeps = substeps;
+        p.iterations = 1;
+        p.gravity = Vec3(0, 0, Real(-9.81));
+        const int steps = int(std::lround(duration / dt));
+        for (int i = 0; i < steps; ++i) step(rod, p);
+        return rod.state.x;
+    };
+
+    std::vector<int> substeps;
+    for (int s = 4; s <= 1024; s *= 2) substeps.push_back(s);
+    std::vector<std::vector<Vec3>> shapes;
+    for (int s : substeps) shapes.push_back(simulate(s));
+
+    Csv csv(outDir, "timestep_convergence.csv", "substeps,substep,difference_to_half,order");
+    std::vector<double> diffs, orders;
+    for (std::size_t k = 0; k + 1 < shapes.size(); ++k) {
+        double d = 0;
+        for (std::size_t i = 0; i < shapes[k].size(); ++i)
+            d = std::max(d, double(norm(shapes[k][i] - shapes[k + 1][i])));
+        diffs.push_back(d);
+    }
+    for (std::size_t k = 0; k < diffs.size(); ++k) {
+        const double order = k + 1 < diffs.size() ? std::log2(diffs[k] / diffs[k + 1]) : 0.0;
+        if (k + 1 < diffs.size()) orders.push_back(order);
+        csv.row(substeps[k], dt / substeps[k], diffs[k], order);
+        res.notes.push_back(fmt("  h = %.3g s: moves %.3g m when halved", dt / substeps[k],
+                                diffs[k]) +
+                            (k + 1 < diffs.size() ? fmt(" (order %.2f)", order) : ""));
+    }
+
+    // At first order the remaining error at h_k is about d_k (the halvings sum
+    // geometrically to it). Compare the coarsest run's with how far the rod
+    // actually moved, which is what the error is an error in.
+    double moved = 0;
+    const Rod start = makeStraightRod(n, Real(1), mat, Vec3(0, 0, 0), Vec3(1, 0, 0));
+    for (std::size_t i = 0; i < shapes.back().size(); ++i)
+        moved = std::max(moved, double(norm(shapes.back()[i] - start.state.x[i])));
+    bool shrinking = true;
+    for (std::size_t k = 1; k < diffs.size(); ++k) shrinking = shrinking && diffs[k] < diffs[k - 1];
+    const double asymptotic = orders.back();
+    res.notes.push_back(fmt("  the rod moves %.3g m; error at h = %.3g s is %.3g of that", moved,
+                            dt / substeps.front(), diffs.front() / moved));
+
+    res.checks.push_back(makeCheck("every halving moves the trajectory less", shrinking ? 1.0 : 0.0,
+                                   1.0, 0.0));
+    res.checks.push_back(makeRangeCheck("observed order in the substep (asymptotic)", asymptotic,
+                                        0.9, 1.1));
+    res.checks.push_back(makeRangeCheck("error at a 1/4 ms substep relative to the motion",
+                                        diffs.front() / moved, 0.0, 0.01));
+    return res;
+}
+
 // ---------------------------------------------------------------- throughput
 //
 // CPU throughput, batched the way the GPU solver batches: many independent rods

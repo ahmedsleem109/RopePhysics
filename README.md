@@ -122,9 +122,10 @@ segments are halved in length, as the theory says it should.
 | Twisted rod buckling | Michell/Greenhill threshold | **2.3%** at 32 segments, converging |
 | Resting on plane, sphere, capsule, box | exact geometry | **2e-16** |
 | Block on a slope | slips at `tan α = μ` | within **1.5%** |
-| Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn |
+| Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn; **0.7%** for μ = 0.1 to 0.75 |
 | Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
 | Timestep accuracy (swinging cantilever) | strain error under 1% | limit at **1–3%** of a segment moved per substep |
+| Timestep refinement (swinging cantilever) | self-convergence | first order, observed **1.00**; error 1e-3 of the motion at 1/4 ms |
 | Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
 | GPU vs CPU, with loads and a driven twist | same trajectory | **5e-8 m** after one step; drift matches float rounding |
 | GPU vs CPU, rod resting on floor and sphere with friction | same trajectory | **1.6e-7 m** after 200 steps (contact itself moves it 1.3 cm) |

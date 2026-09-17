@@ -30,7 +30,8 @@ Nsight-profile the learning batch.
 - WSL Ubuntu has g++ (use for float-vs-double builds with `-DCRS_REAL_FLOAT`).
 - Pushes: SSH key is not on GitHub; push with
   `git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push https://github.com/ahmedsleem109/RopePhysics.git <branches>`.
-  Pushes do not trigger CI (unknown why); dispatch manually.
+  Push ONE branch per `git push`: pushes naming several refs at once created
+  no workflow runs (observed 2026-09-17); single-ref pushes trigger CI.
 - Workflow the user asked for: each feature on its own branch, merged to main
   with --no-ff, pushed.
 
@@ -46,14 +47,15 @@ Nsight-profile the learning batch.
 - **Friction creep:** a cable resting on a bar creeps ~2 mm/s even at 2x the
   needed friction (per-particle contact ratcheting). Try segment-based contact
   or a static-friction anchor per contact; it biases hold/slip answers.
-- **Validation gaps:** timestep-refinement convergence study; tip-load and
-  twist-buckling mesh sweeps beyond n=32 (twist buckling converges at slope
-  0.82 — explain or improve); timestep envelope beyond one scenario
-  (contact-driven, whipping); capstan mu sweep; contact torque (rolling /
-  torsional friction); segment-based rod–primitive contact.
-- **CI:** find why pushes don't trigger workflows; bump actions to Node 24
-  versions (checkout@v5, setup-python@v6, upload-artifact@v5); consider a
-  shorter per-commit suite (twist buckling 9 min, capstan 3 min).
+- **Validation gaps:** tip-load and twist-buckling mesh sweeps beyond n=32
+  (twist buckling converges at slope 0.82 — explain or improve); timestep
+  envelope beyond one scenario (contact-driven, whipping); contact torque
+  (rolling / torsional friction); segment-based rod–primitive contact.
+  Done 2026-09-17: `capstan-mu` (μ 0.1–0.75, worst 0.71%) and
+  `timestep-convergence` (first order in the substep, observed 1.00).
+- **CI:** consider a shorter per-commit suite (twist buckling 9 min, capstan
+  3 min). Done 2026-09-17: actions on Node 24 releases; pushes trigger CI when
+  each branch is pushed on its own.
 - **Media:** re-render the long demo video (tools/make_video.py) with the fixed
   solver, GPU numbers and repo link
   (`--repo "https://github.com/ahmedsleem109/RopePhysics"`); host demo.mp4 as a
@@ -139,15 +141,15 @@ compile; they have never executed.
       builds warning-clean under g++ 13. Not yet run, as there is no remote. It
       will go red on the two stability cases until they are redesigned.
       Consider shortening twist buckling / capstan for per-commit runs.
-- [ ] Timestep-refinement convergence study (only mesh refinement is done).
+- [x] Timestep-refinement convergence study (`timestep-convergence`: first order).
 - [ ] Extend mesh sweeps: cantilever (now n = 256) and moment (now n = 128)
       done; tip-load and twist buckling still at n = 32. Twist buckling converges at slope 0.82 (first
       order) — explain or improve.
 - [ ] Stability rule measured on one scenario only (gravity cantilever), and it
       does not hold once elements are shorter than the rod diameter. Test other
       scenarios (contact-driven motion, whipping) and the short-element regime.
-- [ ] Capstan tested at a single μ = 0.25; incline at one geometry. Add a μ
-      sweep for the capstan.
+- [x] Capstan μ sweep (`capstan-mu`, μ = 0.1–0.75 at half a turn, worst 0.71%).
+      The incline is still one geometry.
 - [ ] Contacts apply no torque to material frames (no rolling/torsional
       friction). Add if the demo or a validation needs it.
 - [ ] Rod–primitive contact is per particle; add segment-based contact if

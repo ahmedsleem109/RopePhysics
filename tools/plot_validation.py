@@ -251,6 +251,40 @@ def plot_capstan(data, figs):
     save(fig, figs, "capstan.png")
 
 
+def plot_capstan_mu(data, figs):
+    d = read(os.path.join(data, "capstan_mu.csv"))
+    mus = sorted(set(d["mu"]))
+    mu_ref = np.linspace(0, max(mus) * 1.08, 200)
+    theta = d["theta"][0]
+    measured = []
+    for m in mus:
+        rows = [k for k, v in enumerate(d["mu"]) if v == m]
+        ratio = np.array([d["ratio"][k] for k in rows])
+        speed = np.array([d["terminal_speed"][k] for k in rows])
+        measured.append(sliding_threshold(ratio, speed))
+    fig, ax = new_fig()
+    ax.semilogy(mu_ref, np.exp(mu_ref * theta), "-", color=T["guide"], linewidth=2,
+                label=r"$e^{\mu\theta}$, half a turn")
+    ax.semilogy(mus, measured, "o", color=T["series"][0], markersize=8,
+                label="measured slip threshold")
+    style(ax, "Capstan across friction coefficients", r"friction coefficient $\mu$",
+          r"$T_2 / T_1$ at slip")
+    legend(ax)
+    save(fig, figs, "capstan_mu.png")
+
+
+def plot_timestep_convergence(data, figs):
+    d = read(os.path.join(data, "timestep_convergence.csv"))
+    fig, ax = new_fig()
+    ax.loglog(d["substep"], d["difference_to_half"], "o-", color=T["series"][0], linewidth=2,
+              markersize=6, label="change when the substep is halved")
+    guide(ax, d["substep"], d["difference_to_half"], 1)
+    style(ax, "Swinging cantilever vs substep refinement", "substep $h$ [s]",
+          "largest particle displacement [m]")
+    legend(ax)
+    save(fig, figs, "timestep_convergence.png")
+
+
 def plot_incline(data, figs):
     d = read(os.path.join(data, "incline.csv"))
     mus = sorted(set(d["mu"]))
@@ -443,12 +477,14 @@ PLOTS = {
     "energy_dissipation.csv": plot_dissipation,
     "twist_buckling.csv": plot_twist,
     "capstan.csv": plot_capstan,
+    "capstan_mu.csv": plot_capstan_mu,
     "incline.csv": plot_incline,
     "self_collision.csv": plot_self_collision,
     "throughput_cpu.csv": plot_throughput,
     "cable_hanging.csv": plot_cable_hanging,
     "gpu_throughput.csv": plot_throughput_gpu,
     "timestep_envelope.csv": plot_timestep_envelope,
+    "timestep_convergence.csv": plot_timestep_convergence,
 }
 
 
