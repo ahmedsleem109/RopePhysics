@@ -133,7 +133,7 @@ __device__ void generateParticleContacts(const DevRodF& d, const View& view, int
         const Vec3f x = view.x[view.P(i)];
         Vec3f n;
         const float gap = signedDistance(d.prims[k], x, n) - d.radius;
-        if (gap >= 0.0f) continue;
+        if (gap >= d.contactMargin) continue;
         c.active = 1;
         c.normal = n;
         c.offset = dot(x, n) - gap;

@@ -230,6 +230,7 @@ bool Batch::create(const Rod& prototype, int numRods, Strategy strategy,
     d.bNumColors = bendColoring_.numColors();
     d.numPrims = numPrims;
     d.radius = float(prototype.material.radius);
+    if (world) d.contactMargin = float(world->contactMarginRadii * prototype.material.radius);
     if (numPrims > 0) {
         std::vector<Primitivef> prims;
         for (const Primitive& p : world->primitives) prims.push_back(toF(p));

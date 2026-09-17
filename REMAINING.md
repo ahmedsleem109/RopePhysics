@@ -44,9 +44,11 @@ Nsight-profile the learning batch.
   colour self contacts per rod (self-collision costs ~11x throughput);
   re-measure GPU headline numbers on a cool GPU (thermal drift seen: 1.16 B →
   0.94 B within a session).
-- **Friction creep:** a cable resting on a bar creeps ~2 mm/s even at 2x the
-  needed friction (per-particle contact ratcheting). Try segment-based contact
-  or a static-friction anchor per contact; it biases hold/slip answers.
+- **Friction near the capstan boundary** is limited by the substep: at 8 x 2
+  (the float-safe cable-hanging setting) a 1.6:1 drape at mu 0.20 slides even in
+  double; 32 substeps hold it. Options: run the GPU scene near the origin or in
+  local coordinates so float resolves smaller substeps, or a static-friction
+  anchor per contact. Creep itself is fixed (contact margin, 2026-09-17).
 - **Validation gaps:** the short-element regime of the timestep rule; contact
   torque (rolling / torsional friction); segment-based rod–primitive contact.
   Done 2026-09-17: tip-load sweep to n = 256 (slope 1.96 vs Reissner),
@@ -161,8 +163,8 @@ compile; they have never executed.
 - [x] Cable hanging: GPU sweep of friction × placement × stiffness, capstan
       boundary on the safe side, CPU/GPU agreement, demo scene and video.
 - [x] Kinematic (moving) pinned particles on CPU and GPU, for grippers.
-- [ ] Friction creep (~2 mm/s on a draped cable even at 2× the needed friction).
-      Investigate segment-based contact, or a static-friction anchor per contact.
+- [x] Friction creep: contacts generated within 0.25 r of the surface
+      (`contactMarginRadii`), CPU and GPU; 1.6 mm/s -> 0 at mu = 0.5.
 - [x] Per-rod friction (`Batch::setMaterialScales`).
 - [x] A manipulation demo that uses the moving gripper (harness routing, learned on the GPU).
 

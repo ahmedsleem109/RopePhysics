@@ -90,6 +90,18 @@ struct CollisionWorld {
     // demands -- see selfCollisionIndexGap.
     int selfSkip = 2;
 
+    // Rod-primitive contacts are generated for particles within this many rod
+    // radii of the surface, not only for those already inside it.
+    //
+    // Contacts are built from the positions a substep starts at, and the last
+    // projection leaves a resting particle exactly on the surface (gap 0). With
+    // no margin that particle has no contact, and so no friction, for the next
+    // substep, and slides freely under the tangential part of gravity before
+    // the substep after catches it. A draped cable crept 1.6 mm/s that way at
+    // more than twice the friction it needed. A margin keeps the contact alive;
+    // the unilateral clamp means a contact that is not touching does nothing.
+    Real contactMarginRadii = Real(0.25);
+
     int hashTableSize = 4096;
 };
 

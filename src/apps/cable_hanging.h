@@ -31,11 +31,10 @@ struct HangingCable {
     Real barRadius = Real(0.05);  // [m]
     Real barHeight = Real(0.8);   // bar axis height above the floor [m]
     Real barHalfLength = Real(0.3);
-    // Simulated seconds after release. Long, because this solver's friction
-    // creeps: even at twice the capstan friction a draped cable creeps about
-    // 2 mm/s, and just above the threshold that creep turns into a slide after
-    // several seconds (mu = 0.28 on a 2:1 drape held at 8 s and fell by 12 s).
-    // A 3 s window matched theory to 0.006 only because it stopped watching.
+    // Simulated seconds after release. Long, because a slide near the
+    // threshold starts slowly. (A 3 s window once matched theory to 0.006 only
+    // because it stopped watching: friction crept then, ~2 mm/s, until contacts
+    // stopped dropping out for a substep -- see CollisionWorld::contactMarginRadii.)
     Real duration = Real(8.0);
 
     // A soft rubber-jacketed cable, 8 mm across. Youngs modulus is what the

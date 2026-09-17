@@ -47,7 +47,7 @@ clip**. It learns the motion in simulation:
 - Each round tries **1024 motions, each on a different random cable** (stiffness
   0.4–4×, friction 0.6–1.4×), all simulated at once on the GPU. It keeps the
   best 10% and tries again.
-- **2% → 86%** of attempts routed in 10 rounds, **127 seconds** on one laptop GPU.
+- **2% → 85%** of attempts routed in 10 rounds, **129 seconds** on one laptop GPU.
 - The learned motion routes **1024 of 1024 new random cables**. A reasonable
   hand-written motion routes **0**.
 - The GPU's verdicts match a double-precision CPU reference on the extreme cables.
@@ -74,10 +74,10 @@ positions × 2 cables, each simulated for 8 seconds after release. That takes
 
 <img src="docs/figs/cable_hanging.png" alt="Hold/slide maps over friction and placement for a soft and a stiffer cable, with the ideal-rope boundary">
 
-- **The soft cable** (left) follows the textbook boundary (dashed line), slightly on
-  the safe side. The simulator never says "holds" where theory says "slips".
+- **The soft cable** (left) follows the textbook boundary (dashed line), on the
+  safe side. The simulator never says "holds" where theory says "slips".
 - **The 3× stiffer cable** (right) is the reason to simulate. Hung more than about
-  **2.3 : 1 off-centre, it slides off no matter how grippy the hook is**. The
+  **2.9 : 1 off-centre, it slides off no matter how grippy the hook is**. The
   textbook formula cannot tell you that, because it ignores bending stiffness.
 
 The same pattern applies to robot cable handling, wire-harness assembly, hanging
@@ -120,16 +120,16 @@ segments are halved in length, as the theory says it should.
 | Large bending under a tip load | exact elastica | tip within **0.06%** of rod length; converges at slope **1.96** to the extensible elastica |
 | Rod with built-in curvature and twist | exact helix | radius to **2e-10**, pitch to **5e-4** |
 | Twisted rod buckling | Michell/Greenhill threshold | **0.18%** at 48 segments, second order |
-| Resting on plane, sphere, capsule, box | exact geometry | **2e-16** |
-| Block on a slope | slips at `tan α = μ` | within **1.5%** |
+| Resting on plane, sphere, capsule, box | exact geometry | **1e-14** |
+| Block on a slope | slips at `tan α = μ` | within **0.5%** |
 | Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn; **0.7%** for μ = 0.1 to 0.75 |
-| Rope coiling into a pile | no self-penetration | worst overlap **0.18%** of diameter |
+| Rope coiling into a pile | no self-penetration | worst overlap **0.05%** of diameter |
 | Timestep accuracy (swing, drop onto floor, whip) | strain error under 1% | limit at **1–6%** of a segment moved per substep |
 | Timestep refinement (swinging cantilever) | self-convergence | first order, observed **1.00**; error 1e-3 of the motion at 1/4 ms |
 | Independent NumPy re-implementation | same trajectory | **5e-13 m** apart after 200 steps |
 | GPU vs CPU, with loads and a driven twist | same trajectory | **5e-8 m** after one step; drift matches float rounding |
-| GPU vs CPU, rod resting on floor and sphere with friction | same trajectory | **1.6e-7 m** after 200 steps (contact itself moves it 1.3 cm) |
-| GPU vs CPU, coiling rope with self-contact | same step | **6e-6 m**, inside float rounding (1.8e-5 m) |
+| GPU vs CPU, rod resting on floor and sphere with friction | same trajectory | **3e-8 m** after 200 steps (contact itself moves it 1.3 cm) |
+| GPU vs CPU, coiling rope with self-contact | same step | **2e-6 m**, inside float rounding (1.8e-5 m) |
 
 <table>
 <tr>
@@ -307,12 +307,11 @@ continuous integration.
 - **Self-collision is the expensive part on the GPU** (about 11× slower than a
   plain rod), because contact projection within one rod stays sequential to
   match the CPU exactly. There is no profiler study yet.
-- **Friction creeps.** A cable resting on a bar slowly slides, about 2 mm/s even
-  at twice the needed friction, so near the hold/slip boundary a cable can slide
-  off after several seconds. Hold/slip answers are therefore reported for a
-  stated time window (8 s) and err on the safe side. The likely cause is that
-  contact is per particle: a rope over a bar rests on a few points, which keep
-  changing.
+- **Friction near the hold/slip boundary depends on the substep.** At the 8
+  substeps the GPU cable sweep can afford in single precision, a cable at low
+  friction slides a little earlier than theory, so hold/slip answers err on the
+  safe side (by about 0.06 in μ, median). An earlier creep of a resting cable,
+  about 2 mm/s, is fixed: contacts were dropping out for a substep.
 - Contacts apply no torque to frames.
 - The integrator dissipates energy slightly; this shrinks with more substeps.
 

@@ -93,7 +93,7 @@ void generateContacts(const Rod& rod, const CollisionWorld& world, ContactSet& o
             Vec3 n;
             const Real d = signedDistance(prim, s.x[i], n);
             const Real gap = d - r;
-            if (gap >= Real(0)) continue;
+            if (gap >= world.contactMarginRadii * r) continue;
             const int idx[1] = {static_cast<int>(i)};
             const Real w[1] = {Real(1)};
             out.contacts.push_back(makeContact(s, idx, w, 1, n, gap, prim.friction));
