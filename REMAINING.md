@@ -1,26 +1,61 @@
 # What remains to build
 
-## Wire-harness demo (branch `feature/harness-routing`, 2026-09-17)
+## ▶ START HERE — next session (handoff written 2026-09-17)
 
-Goal: a demo a robotics-simulation company (target: Vsim) gets in seconds, a
-robot arm routing a wire harness, learned on the GPU across randomized cables.
+Everything below "Done" is merged to `main` and pushed. Work the queue **in
+this order**, one branch per item, merge to main with `--no-ff`, push each
+branch on its own (see Working notes), and update this file as items close.
 
-Done:
-- Task `apps::HarnessTask`: pegs offset into an S-route, score 3 = routed and
-  laid against the pegs, clip = between post centres, 10 ms gripper control.
-- `rodsim harness-learning`: CEM, 10 x 1024 attempts, 2% -> 86% in 127 s; the
-  learned motion routes 1024/1024 fresh cables, hand-written 0/1024; CPU/GPU
-  agree 4/4. Deterministic (bitwise-identical rerun).
-- `rodsim scene harness --out <dir>` replays `<dir>/harness.policy` and
-  `<dir>/harness.cable` ("youngsScale frictionScale").
-- Renderer: board, pegs, clip, connector, IK arm on the gripper path.
-- `tools/make_harness_video.py` -> out/video/harness.mp4 + docs/media/harness.gif.
-- README lead section and writeup §7.
+### Queue, in order
 
-Left: merge to main with --no-ff, push, dispatch CI
-(`gh workflow run validation.yml -R ahmedsleem109/RopePhysics --ref main`).
-Ideas: closed-loop policy (observe cable), randomize the cable's start pose,
-Nsight-profile the learning batch.
+1. **Full Phase 1–2 suite on the GPU path.** Every CPU validation case that has
+   a GPU-expressible scenario (cantilever/moment dynamics, contact, incline,
+   capstan, self-collision, energy) run through `gpu::Batch` and compared with
+   the CPU result / the analytic reference. New case(s) in `src/gpu/gpu_cases.cpp`,
+   skipping without CUDA. Judge against a float CPU build (`CRS_REAL_FLOAT`,
+   g++ in WSL), not bitwise double.
+2. **Colour self contacts per rod on the GPU** (self-collision costs ~11x
+   throughput because projection within a rod is sequential). Must keep
+   `gpu-parity` self-collision checks passing within float rounding; report the
+   throughput gain in `gpu-throughput` / writeup §5.
+3. **Re-measure the GPU headline** (1.17 B segment-substeps/s, thermal drift seen
+   1.16 B -> 0.94 B) on a cool, idle GPU; update README "How fast" and writeup.
+4. **Nsight Compute profile** (installed 2025.4.0) of the fused kernel:
+   occupancy, bandwidth, which kernels are latency- vs bandwidth-bound. Use the
+   CLI (`ncu`/`nsys`) to capture; GUI screenshots need the user — ask them.
+5. **Friction accuracy near the capstan boundary.** At 8 substeps x 2 (the
+   float-safe cable-hanging setting) a 1.6:1 drape at mu 0.20 slides even in
+   double; 32 substeps hold it (`build/rodhang.exe 1.6 0.20 0.25 32 2 cpu`).
+   Soft-cable boundary median is 0.059 (safe side). Options: static-friction
+   anchor per contact; or run the GPU scene in coordinates small enough that
+   float resolves 32 substeps (float spacing ~ |coord|; see
+   HangingCable::floatMotionMargin). Goal: median well under 0.03 without
+   creep coming back (`build/rodcreep.exe 0.25` must stay ~0 mm/s).
+6. **Short-element regime of the timestep rule** (elements shorter than the rod
+   diameter), extending `timestep-motions` / `timestep-envelope`.
+7. **Contact torque** (rolling / torsional friction) and **segment-based
+   rod–primitive contact** (for segments longer than the diameter).
+8. **Media:** re-render the long demo (`tools/make_video.py --repo
+   "https://github.com/ahmedsleem109/RopePhysics"`) with current solver and GPU
+   numbers. **Ask the user before creating a GitHub release** (public) to host
+   demo.mp4 / harness.mp4.
+9. **Python binding** (minimal, Warp-style): design choice (pybind11 vs nanobind
+   vs ctypes) — propose one and ask if unclear.
+
+### Done 2026-09-17 (for context)
+- Harness demo: `rodsim harness-learning` (CEM, 10 x 1024 GPU attempts,
+  2% -> 85% in 129 s; learned 1024/1024 vs hand-written 0/1024; CPU/GPU agree),
+  `tools/make_harness_video.py`, README lead, writeup §7. Videos in out/video/
+  (git-ignored): harness.mp4 (50 s), harness_learned_policy.mp4 (19 s,
+  tools/make_learned_policy_video.py). LinkedIn post drafted for the user.
+- CI: actions on Node 24; one branch per push triggers CI.
+- `capstan-mu` (0.71%), `timestep-convergence` (first order), tip-load sweep to
+  n = 256 (slope 1.96 vs Reissner), `timestep-motions` (swing/drop/whip, 1-6%
+  of an element per substep), twist buckling by growth rate (0.18% at n = 48,
+  second order, 3 min instead of 9).
+- Friction creep fixed: `CollisionWorld::contactMarginRadii = 0.25` (CPU + GPU).
+- Probes in tools/experiments: rodtwist (twist window/rate), rodcreep (creep),
+  rodhang (CPU vs GPU hang placement).
 
 ### Working notes
 - Build from Git Bash: `cmd //c "D:\ropephysics\build.cmd"`; rodsim.exe cannot
