@@ -26,6 +26,7 @@ add_executable(rodsim
   src/validation/scenes.cpp
   src/validation/application_cases.cpp
   src/gpu/gpu_cases.cpp
+  src/gpu/gpu_suite.cpp
 )
 target_link_libraries(rodsim PRIVATE crs_core)
 

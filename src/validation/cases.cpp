@@ -43,27 +43,6 @@ Check makeRangeCheck(const std::string& name, double value, double lo, double hi
     return c;
 }
 
-namespace {
-
-// Least-squares slope of log10(y) against log10(x). Used to report the observed
-// convergence order; reported, never asserted away.
-double logLogSlope(const std::vector<double>& xs, const std::vector<double>& ys) {
-    const std::size_t n = xs.size();
-    if (n < 2) return 0;
-    double sx = 0, sy = 0, sxx = 0, sxy = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        const double lx = std::log10(xs[i]), ly = std::log10(ys[i]);
-        sx += lx;
-        sy += ly;
-        sxx += lx * lx;
-        sxy += lx * ly;
-    }
-    const double d = n * sxx - sx * sx;
-    return d == 0 ? 0 : (n * sxy - sx * sy) / d;
-}
-
-}  // namespace
-
 // ------------------------------------------------------- solver convergence
 //
 // Before any mesh-convergence claim means anything, the solver itself has to be
@@ -277,79 +256,6 @@ CaseResult runElasticaMoment(const std::string& outDir) {
 }
 
 // ---------------------------------------------------------------- tip-load elastica
-namespace {
-
-// Reference solution of the inextensible planar elastica under a transverse tip
-// load, by shooting on the exact BVP rather than elliptic integrals:
-//
-//   EI theta'' = -P cos(theta),   theta(0) = 0,   theta'(L) = 0
-//
-// theta is measured from the undeformed axis toward the load. Integrating the
-// tangent afterwards gives the tip position.
-struct ElasticaRef {
-    double tipX = 0, tipZ = 0, tipAngle = 0;
-};
-
-//
-// With EA and kGA given (0 = rigid), it is Reissner's extensible, shearable
-// elastica instead -- the continuum the Cosserat rod actually discretizes. The
-// internal force is the tip load throughout, so the axial strain is
-// P sin(theta) / EA and the shear strain -P cos(theta) / kGA, the centreline
-// tangent is r' = (1 + eps) t + gamma n with t = (cos, -sin), n = (sin, cos),
-// and moment balance reads EI theta'' = -P x'.
-ElasticaRef solveElasticaRef(double P, double L, double EI, double EA = 0, double kGA = 0,
-                             int steps = 20000) {
-    const double a = P / EI;
-    auto dxds = [&](double th) {
-        const double eps = EA > 0 ? P * std::sin(th) / EA : 0.0;
-        const double gamma = kGA > 0 ? -P * std::cos(th) / kGA : 0.0;
-        return (1 + eps) * std::cos(th) + gamma * std::sin(th);
-    };
-    auto dzds = [&](double th) {
-        const double eps = EA > 0 ? P * std::sin(th) / EA : 0.0;
-        const double gamma = kGA > 0 ? -P * std::cos(th) / kGA : 0.0;
-        return -(1 + eps) * std::sin(th) + gamma * std::cos(th);
-    };
-    auto shoot = [&](double kappa0, ElasticaRef* out) {
-        const double ds = L / steps;
-        double th = 0, dth = kappa0, x = 0, z = 0;
-        for (int i = 0; i < steps; ++i) {
-            // RK4 on (theta, theta') with theta'' = -a x'(theta).
-            const double k1t = dth, k1d = -a * dxds(th);
-            const double k2t = dth + 0.5 * ds * k1d, k2d = -a * dxds(th + 0.5 * ds * k1t);
-            const double k3t = dth + 0.5 * ds * k2d, k3d = -a * dxds(th + 0.5 * ds * k2t);
-            const double k4t = dth + ds * k3d, k4d = -a * dxds(th + ds * k3t);
-            // Trapezoid the tangent over the same interval for x and z.
-            const double thNext = th + ds * (k1t + 2 * k2t + 2 * k3t + k4t) / 6.0;
-            x += 0.5 * ds * (dxds(th) + dxds(thNext));
-            z += 0.5 * ds * (dzds(th) + dzds(thNext));
-            dth += ds * (k1d + 2 * k2d + 2 * k3d + k4d) / 6.0;
-            th = thNext;
-        }
-        if (out) {
-            out->tipX = x;
-            out->tipZ = z;
-            out->tipAngle = th;
-        }
-        return dth;  // theta'(L), zero at the solution
-    };
-
-    // theta'(L) grows monotonically with the shooting parameter, so bisect.
-    double lo = 0, hi = 10 * a * L + 10;
-    for (int i = 0; i < 64; ++i) {  // halves a bracket of O(10) past double precision
-        const double mid = 0.5 * (lo + hi);
-        if (shoot(mid, nullptr) > 0)
-            hi = mid;
-        else
-            lo = mid;
-    }
-    ElasticaRef ref;
-    shoot(0.5 * (lo + hi), &ref);
-    return ref;
-}
-
-}  // namespace
-
 CaseResult runElasticaTipLoad(const std::string& outDir) {
     CaseResult res;
     res.name = "elastica: large-deflection tip load";
@@ -468,70 +374,11 @@ CaseResult runHelix(const std::string& outDir) {
     p.linearDamping = p.angularDamping = Real(20);
     const RelaxReport rep = relaxToEquilibrium(rod, p, 60000, Real(1e-9));
 
-    // Axis: a rod with a constant Darboux vector is a rigid screw, so the
-    // material frame rotates about the helix axis and nothing else. The axis of
-    // the world-frame rotation carrying the first frame onto the last is
-    // therefore the helix axis exactly.
-    //
-    // (Averaging the tangents also "works", but only over a whole number of
-    // turns: over 1.78 turns it tilts the axis enough to bias a circle fit by
-    // 8%, which is how this measurement first went wrong.)
-    const Quat rel = sameHemisphere(rod.state.q[nSegRef - 1] * conj(rod.state.q[0]), Quat());
-    Vec3 axis = normalize(rel.im());
-
-    // Two in-plane basis vectors perpendicular to the axis.
-    Vec3 e1 = std::abs(axis.x) < Real(0.9) ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
-    e1 = normalize(e1 - axis * dot(e1, axis));
-    const Vec3 e2 = cross(axis, e1);
-
-    // Algebraic (Kasa) circle fit of the projected centerline.
-    double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
-    std::vector<double> us, vs, ws;
-    const std::size_t nP = rod.state.numParticles();
-    for (std::size_t i = 0; i < nP; ++i) {
-        const Vec3 x = rod.state.x[i];
-        const double u = dot(x, e1), v = dot(x, e2);
-        us.push_back(u);
-        vs.push_back(v);
-        ws.push_back(dot(x, axis));
-        const double zz = u * u + v * v;
-        sx += u; sy += v; sxx += u * u; syy += v * v; sxy += u * v;
-        sxz += u * zz; syz += v * zz; sz += zz;
-    }
-    const double N = double(nP);
-    const double a11 = 2 * (sxx - sx * sx / N), a12 = 2 * (sxy - sx * sy / N);
-    const double a22 = 2 * (syy - sy * sy / N);
-    const double b1 = sxz - sx * sz / N, b2 = syz - sy * sz / N;
-    const double det = a11 * a22 - a12 * a12;
-    const double cu = (b1 * a22 - b2 * a12) / det, cv = (a11 * b2 - a12 * b1) / det;
-    double radius = 0;
-    for (std::size_t i = 0; i < nP; ++i)
-        radius += std::sqrt((us[i] - cu) * (us[i] - cu) + (vs[i] - cv) * (vs[i] - cv));
-    radius /= N;
-
-    // Pitch: unwrap the angle about the axis and regress axial position on it.
-    double prev = 0, unwrapped = 0;
-    std::vector<double> phis;
-    for (std::size_t i = 0; i < nP; ++i) {
-        const double ang = std::atan2(vs[i] - cv, us[i] - cu);
-        if (i > 0) {
-            double d = ang - prev;
-            while (d > kPi) d -= 2 * kPi;
-            while (d < -kPi) d += 2 * kPi;
-            unwrapped += d;
-        }
-        prev = ang;
-        phis.push_back(unwrapped);
-    }
-    double pp = 0, pw = 0, ppp = 0, ppw = 0;
-    for (std::size_t i = 0; i < nP; ++i) {
-        pp += phis[i]; pw += ws[i]; ppp += phis[i] * phis[i]; ppw += phis[i] * ws[i];
-    }
-    const double slope = (N * ppw - pp * pw) / (N * ppp - pp * pp);
-    const double pitch = std::abs(slope) * 2 * kPi;
+    const HelixShape shape = measureHelix(rod, nSegRef - 1);
+    const double radius = shape.radius, pitch = shape.pitch;
 
     Csv csv(outDir, "helix.csv", "segments,radius,radius_ref,pitch,pitch_ref,turns,steps,converged");
-    csv.row(n, radius, Rref, pitch, pitchRef, std::abs(phis.back()) / (2 * kPi), rep.steps,
+    csv.row(n, radius, Rref, pitch, pitchRef, shape.turns, rep.steps,
             rep.converged ? 1 : 0);
 
     // The target helix is the rod's zero-energy state, so residual elastic
@@ -545,7 +392,7 @@ CaseResult runHelix(const std::string& outDir) {
     const double eResidual = rod.elasticEnergy() / eScale;
 
     res.notes.push_back(fmt("  kappa = %.4g 1/m, tau = %.4g 1/m, %.4f turns over L = 1 m",
-                            double(kappa), double(tau), std::abs(phis.back()) / (2 * kPi)));
+                            double(kappa), double(tau), shape.turns));
     res.notes.push_back(fmt("  turns expected %.4f; residual elastic energy %.3g of straight-rod",
                             L * std::sqrt(double(kappa * kappa + tau * tau)) / (2 * kPi),
                             eResidual));
@@ -667,7 +514,7 @@ CaseResult runTwistBuckling(const std::string& outDir) {
         for (int i = 1; i <= maxSteps; ++i) {
             step(rod, p);
             double amp = 0;
-            for (const Vec3& x : rod.state.x) amp = std::max(amp, std::sqrt(x.x * x.x + x.y * x.y));
+            for (const Vec3& x : rod.state.x) amp = std::max(amp, std::sqrt(double(x.x * x.x + x.y * x.y)));
             if (t1 < 0 && amp > 1e-5) t1 = i * double(p.dt);
             if (amp > 1e-3) return std::log(100.0) / (i * double(p.dt) - t1);
         }
@@ -857,7 +704,7 @@ CaseResult runEnergyDrift(const std::string& outDir) {
         double pScale = 0;
         for (std::size_t i = 0; i < rod.state.numParticles(); ++i)
             pScale += rod.state.mass[i] * norm(rod.state.v[i]);
-        const double lScale = std::max(norm(l0), pScale * L);
+        const double lScale = std::max(double(norm(l0)), pScale * L);
 
         double eAfterTransient = 0, maxLate = 0, maxP = 0, maxL = 0, maxGain = 0;
         for (int i = 0; i <= steps; ++i) {

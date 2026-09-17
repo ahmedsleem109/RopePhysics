@@ -8,12 +8,9 @@ branch on its own (see Working notes), and update this file as items close.
 
 ### Queue, in order
 
-1. **Full Phase 1–2 suite on the GPU path.** Every CPU validation case that has
-   a GPU-expressible scenario (cantilever/moment dynamics, contact, incline,
-   capstan, self-collision, energy) run through `gpu::Batch` and compared with
-   the CPU result / the analytic reference. New case(s) in `src/gpu/gpu_cases.cpp`,
-   skipping without CUDA. Judge against a float CPU build (`CRS_REAL_FLOAT`,
-   g++ in WSL), not bitwise double.
+1. ~~**Full Phase 1–2 suite on the GPU path.**~~ Done 2026-09-17: `rodsim
+   gpu-suite` (src/gpu/gpu_suite.cpp). See "Done" and items 10–12 for what it
+   found.
 2. **Colour self contacts per rod on the GPU** (self-collision costs ~11x
    throughput because projection within a rod is sequential). Must keep
    `gpu-parity` self-collision checks passing within float rounding; report the
@@ -41,8 +38,33 @@ branch on its own (see Working notes), and update this file as items close.
    demo.mp4 / harness.mp4.
 9. **Python binding** (minimal, Warp-style): design choice (pybind11 vs nanobind
    vs ctypes) — propose one and ask if unclear.
+10. **Capstan fails in colour order (GPU and coloured double CPU).** Found by
+    `gpu-suite`: critical ratios 0–0.8x exp(mu theta); sequential sweeps pass at
+    1%; 24/96 sweeps do not help; mainly the red-black STRETCH sweep. Parity never
+    saw it (it compares GPU to the coloured CPU). Investigate why the coloured
+    fixed point differs with friction (tension transport vs per-substep friction
+    budget?), fix, and move `capstan` out of the [LIMIT] list. Probably affects
+    item 5 and the cable/harness apps; re-check `cable-hanging` after.
+11. **Float motion margin in plain contact.** Incline at 8 substeps misses in
+    float (GPU 13.5%/27%, float CPU 9.9%/26%); g h^2 = 1.5e-7 m per substep.
+    Passes at 2 substeps. Same mechanism as HangingCable::floatMotionMargin.
+    Candidates: per-rod local origin on the device, or position deltas stored
+    relative to xPrev. Then re-run the float-limited `gpu-suite` scenarios.
+12. **Other float-limited GPU scenarios** (reported, not validated, in
+    `gpu-suite`): static relaxations, twist buckling (1e-9 m per substep), 100 s
+    undamped free flight. Decide per scenario: fix via item 11, or document as
+    out of scope for a float batch.
+
 
 ### Done 2026-09-17 (for context)
+- `gpu-suite`: every GPU-expressible Phase 1-2 case run end to end on the GPU and
+  on the coloured double CPU, float CPU build as the tie-breaker. Validated:
+  helix, contact primitives, self-collision, incline at 2 substeps. Limited
+  (reported with evidence): incline at 8 substeps, statics relaxations, twist
+  buckling, energy (float); capstan (colour order, item 10). Writeup §5.
+  Debug: CRS_GPU_SUITE_ONLY=a,b and CRS_GPU_SUITE_NO_CPU=1; float calibration:
+  CRS_GPU_SUITE_CPU=1 on a CRS_REAL_FLOAT build (compile core, validation,
+  apps, gpu_cases.cpp, gpu_suite.cpp, main.cpp with g++; not gpu_batch.cpp).
 - Harness demo: `rodsim harness-learning` (CEM, 10 x 1024 GPU attempts,
   2% -> 85% in 129 s; learned 1024/1024 vs hand-written 0/1024; CPU/GPU agree),
   `tools/make_harness_video.py`, README lead, writeup §7. Videos in out/video/

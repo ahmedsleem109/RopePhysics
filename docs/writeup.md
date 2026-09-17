@@ -477,6 +477,57 @@ Self-collision is the expensive feature: about 0.09× the plain throughput at
 16 384 × 64. The sequential projection is the part a future version would
 colour.
 
+**The Phase 1–2 suite on the GPU** (`rodsim gpu-suite`). Parity over 200 steps
+does not show that a slip angle or a buckling threshold survives the thousands
+of steps it takes to measure one. So every CPU case with a scenario the batch
+can express runs end to end through `gpu::Batch`, and the same code runs again
+on the double CPU in colour order. Batches are shaped like an RL batch: every
+tension ratio and friction coefficient of a capstan wrap in one batch, every
+twist of a buckling mesh in another. The CPU half was also built with
+`CRS_REAL_FLOAT` (g++ in WSL, `CRS_GPU_SUITE_CPU=1`), which splits each miss into
+"float" and "kernel".
+
+Four scenarios hold at the CPU case's own tolerances, and each sits within the
+float-vs-double spread of the CPU:
+
+| scenario | GPU | double CPU | float CPU |
+|---|---|---|---|
+| helix radius / pitch (rel.) | 8.8e-4 / 5.2e-4 | 4e-13 / 5.2e-4 | 1.3e-3 / 3.9e-4 |
+| rest height on 4 primitives (rel.), penetration | 2.2e-8, 4.8e-9 m | 2e-13, 0 | 0, 4.7e-9 m |
+| coiling rope: overlap / diameter, contact overflow | 1.6e-4, 0 | 6.1e-4 | 1.5e-4 |
+| incline at 2 substeps: slip angle, μ while sliding | 1.8%, 2.7% | 0.5%, 0% | 1.6%, 2.6% |
+
+Six do not, and the float CPU build shows why. In each, the float CPU misses as
+badly as the GPU:
+
+- **Incline at 8 substeps** (the CPU case's setting): 13.5% slip angle and 27%
+  μ on the GPU, 9.9% and 26% on the float CPU. A resting rod is pushed into the
+  plane by g h² = 1.5e-7 m per substep, a few float steps at 1 m. At 4 substeps
+  the float CPU is at 19% / 6.8%; at 2 it passes. This is the float motion
+  margin of §6 again, now in the plainest possible contact.
+- **Static relaxations** (cantilever, tip-load elastica, end moment): the damped
+  XPBD relaxation does not settle in float. The GPU ends 0.7% of L from the
+  direct solve and 2.6% off the arc radius; the float CPU is worse still, at
+  0.81 L and 31×.
+- **Twist buckling**: at 16 n substeps per millisecond a substep moves the rod
+  about 1e-9 m. The GPU thresholds are 0.8–8.5% off with no convergence (slope
+  0.3); the float CPU's are 5.6–8.0% (slope 0.2).
+- **Energy**: 100 s of undamped free flight. The GPU gains 0.10 of the energy at
+  2 substeps and 4.4e3 at 16; the float CPU 0.10 and 5.4e3.
+- **Capstan**, the one that is not float. The GPU's critical ratios come out at
+  zero to 0.8× exp(μθ) instead of 1×. The colour-ordered **double** CPU does the
+  same (0.02–0.77 of the capstan ratio). The same double CPU with sequential
+  sweeps passes at 1%, and 24 or 96 sweeps per substep change nothing. With only the
+  stretch sweep sequential and the bend sweep coloured, five of seven ratios come
+  back within 8% (the other two fits had 2–3 sliding points). With only the stretch
+  sweep coloured, they sit at 0.60–0.93. So the cause is mainly the red-black
+  stretch sweep. The parity case never saw this
+  because it compares the GPU with the coloured CPU, and they agree.
+
+What this establishes: the GPU reproduces the float CPU everywhere. What single
+precision can resolve, it gets right. The capstan miss is a property of the
+coloured iteration, not of the port.
+
 No Nsight profile has been taken yet.
 
 ---
@@ -707,6 +758,11 @@ This is the section that matters most, so it is specific.
   (§5) for every feature, but self-collision costs about 11× in throughput,
   and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
+  Run end to end (`gpu-suite`), the GPU holds the helix, contact, self-collision
+  and incline (at 2 substeps) cases. It misses the incline at 8 substeps, the
+  static relaxations, twist buckling and long free flight exactly as a float CPU
+  build does. It misses the capstan exactly as a colour-ordered double CPU does
+  (§5).
 - **The timestep envelope** (§8) is measured in detail on a gravity swing
   (16–64 segments, three stiffnesses) and checked at 32 segments on a drop onto
   the floor and a whip. Contact needs a 3–5× smaller substep than the swing
