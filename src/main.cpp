@@ -42,6 +42,7 @@ const Entry kCases[] = {
     {"gpu-throughput", crs::runGpuThroughput},
     {"timestep-envelope", crs::runTimestepEnvelope},
     {"timestep-convergence", crs::runTimestepConvergence},
+    {"timestep-motions", crs::runTimestepMotions},
     {"throughput", crs::runThroughput},
     {"cable-hanging", crs::runCableHanging},
     {"harness-learning", crs::runHarnessLearning},

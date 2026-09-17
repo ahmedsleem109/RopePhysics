@@ -186,9 +186,9 @@ case for them, and rotating one about the tangent is how twist is imposed.
 |---|---|---|
 | cantilever | Euler–Bernoulli / Timoshenko | slope 2.00; 7.6e-6 off Timoshenko at n = 256; frame invariant to 2e-12 |
 | pure end moment | exact circular arc of radius `EI/M` | slope 2.01; 1.0e-4 at n = 128 |
-| tip-load elastica | exact planar elastica by shooting | worst 6.3e-4 L |
+| tip-load elastica | exact planar elastica by shooting; Reissner's extensible elastica | worst 6.3e-4 L at n = 32; vs extensible: slope 1.96, 9.4e-6 L at n = 256 |
 | helix | `R = κ/(κ²+τ²)`, pitch `2πτ/(κ²+τ²)` | 2.2e-10 and 5.2e-4 relative |
-| twist buckling | clamped–clamped Michell threshold | 2.3% at n = 32, converging |
+| twist buckling | clamped–clamped Michell threshold | 0.18% at n = 48, slope 1.93 |
 | energy | conservation invariants | momentum to 1e-9; dissipation and gain shrink with substeps |
 | cross-check | independent NumPy implementation | 4.7e-13 m after 200 steps |
 
@@ -215,9 +215,21 @@ it and the rod stored no twist at all. Constructing the uniformly twisted state
 directly fixed that. The next version used static relaxation and found the
 threshold 18% low — but raising the damping made the "buckling" vanish, which no
 physical instability does. A heavily-iterated XPBD step is close to backward
-Euler, and backward Euler damps genuinely unstable modes. The final case runs
-honest dynamics (256 substeps, one sweep, no damping) and bisects on growth of a
-seeded perturbation. It also checks the twisted base state's stored energy
+Euler, and backward Euler damps genuinely unstable modes. The case then ran
+honest dynamics (256 substeps, one sweep, no damping) and bisected on whether a
+seeded perturbation grew 100× within 4 s. That reported 2.3% at n = 32,
+converging at slope 0.82, and both numbers were the window. Above threshold the
+perturbation grows as `e^{σt}` with `σ ∝ √(Φ − Φ_crit)`, so a window `T`
+overshoots by about `1/T²`. At n = 32 the same bisection gave +2.41%, +0.85%
+and +0.47% for 4, 8 and 16 s windows (`tools/experiments/twist_window.cpp`).
+The fourth version measures `σ` itself at twists 2–12% above theory and
+extrapolates `σ²`, a smooth quadratic in `Φ`, to zero. No window enters. The
+threshold error is 1.46%, 0.65%, 0.37% and 0.18% at n = 16, 24, 32 and 48:
+second order (slope 1.93). The substep scales with the element (16 n per ms).
+At n = 48, 256 substeps left a 0.013% time error that bent the last point. The
+case went from 9 minutes to 3.
+
+The case also checks the twisted base state's stored energy
 against the *discrete* prediction: the discrete twist measure `2 sin(φ/2)/lbar`
 stores about 2% less than the continuum at half a radian per joint, an `O(h²)`
 difference that a check against the continuum value would have flagged as a bug.
@@ -625,6 +637,26 @@ backward-Euler-like substep. At a 1/4 ms substep the remaining error is about
 
 ![Timestep convergence](figs/timestep_convergence.png)
 
+**Beyond the swing.** `timestep-motions` repeats the bisection on two motions
+that are not a gravity swing, at 32 segments: a free rod dropped 0.5 m, tilted
+20°, onto a floor with friction, and a rod pinned at one end with that end
+shaken at 4 Hz, 5 cm amplitude. The swing's `v = √(2gL)` does not describe
+either, so the limit is stated in each run's own peak particle speed:
+
+| motion | E | largest accurate substep | peak speed | elements per substep |
+|---|---|---|---|---|
+| swing | 1e8 / 1e9 | 158 / 216 µs | 4.5 / 3.3 m/s | 2.3% / 2.3% |
+| drop onto floor | 1e9 / 1e10 | 30 / 24 µs | 10 / 15 m/s | 1.0% / 1.2% |
+| whip | 1e8 / 1e9 | 231 / 228 µs | 7.8 / 7.9 m/s | 5.7% / 5.7% |
+
+The rule survives, within a 6× band of 1–6% of an element per substep. Two
+caveats. The drop's peak speed is produced by contact resolution. It is far
+above the 3.1 m/s the rod lands at, and measured against the landing speed,
+contact needs a substep 3–5× smaller than the swing rule would suggest. The
+drop also cannot use softer rods. An impact at speed `v` strains a rod by about
+`v/c` with `c = √(E/ρ)`, which is 1% at `E = 1e8`. That strain is physical and
+over tolerance at any timestep.
+
 ---
 
 ## 9. Throughput (CPU)
@@ -660,12 +692,12 @@ This is the section that matters most, so it is specific.
   (§5) for every feature, but self-collision costs about 11× in throughput,
   and there is no profiler output.
   GPU parity is established to float rounding, not bitwise against the CPU.
-- **The timestep envelope is one scenario deep** (§8): a gravity swing, 16–64
-  segments. Contact-driven and whipping motion are not covered.
+- **The timestep envelope** (§8) is measured in detail on a gravity swing
+  (16–64 segments, three stiffnesses) and checked at 32 segments on a drop onto
+  the floor and a whip. Contact needs a 3–5× smaller substep than the swing
+  rule gives from the landing speed.
 - **The demo scenes were simulated before the material-frame fix** and should
   be re-run.
-- **Twist buckling** is first order over n = 12–32 and 2.3% off at the finest
-  mesh.
 - **Energy is dissipated,** not conserved. Only its convergence with substeps is
   established, over 2–16 substeps.
 - **Contact is simplified.** Rod–world contact is per particle (a chain of
@@ -675,8 +707,8 @@ This is the section that matters most, so it is specific.
 - **Friction validation is narrow:** one incline geometry; the capstan covers
   four wrap angles at μ = 0.25 and four coefficients at half a turn. The capstan
   rope's density is unphysical by design.
-- **The stability rule is one scenario deep** and restricted to elements longer
-  than the rod's diameter.
+- **The stability rule is untested for elements shorter than the rod's
+  diameter.**
 - **The demo video's simulations ran on the CPU,** and it says so on screen,
   with the measured wall-clock cost per simulated second.
 - **The harness policy is open loop:** five waypoints on a fixed schedule, no

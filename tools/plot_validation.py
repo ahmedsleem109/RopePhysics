@@ -162,6 +162,20 @@ def plot_tipload(data, figs):
     save(fig, figs, "elastica_tipload.png")
 
 
+def plot_tipload_convergence(data, figs):
+    d = read(os.path.join(data, "elastica_tipload_convergence.csv"))
+    fig, ax = new_fig()
+    ax.loglog(d["h"], d["worst_err_extensible"], "o-", color=T["series"][0], linewidth=2,
+              markersize=6, label="vs extensible, shearable elastica (Reissner)")
+    ax.loglog(d["h"], d["worst_err_inextensible"], "s-", color=T["series"][1], linewidth=2,
+              markersize=5, label="vs inextensible elastica")
+    guide(ax, d["h"], d["worst_err_extensible"], 2)
+    style(ax, r"Large tip load: worst tip error over $\alpha$ = 0.5..5",
+          "element length $h$ [m]", "tip position error / $L$")
+    legend(ax)
+    save(fig, figs, "elastica_tipload_convergence.png")
+
+
 def plot_energy(data, figs):
     d = read(os.path.join(data, "energy_drift.csv"))
     fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
@@ -191,19 +205,24 @@ def plot_dissipation(data, figs):
 
 def plot_twist(data, figs):
     d = read(os.path.join(data, "twist_buckling.csv"))
-    fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
     ref = d["phi_crit_ref"][0]
-    ax0.plot(d["h"], d["phi_crit"], "o-", color=T["series"][0], linewidth=2, markersize=7,
-             label="measured")
-    ax0.axhline(ref, color=T["guide"], linestyle="--", linewidth=1)
-    ax0.annotate(f"clamped-clamped theory {ref:.3f} rad", (max(d["h"]), ref), color=T["guide"],
-                 fontsize=8, xytext=(-150, 6), textcoords="offset points")
-    ax0.set_xlim(0, max(d["h"]) * 1.1)
-    style(ax0, "Twist-buckling threshold vs mesh", "element length $h$ [m]",
-          r"critical end rotation $\Phi$ [rad]")
+    fig, (ax0, ax1) = new_fig(9.0, 3.7, 2)
+    rates_path = os.path.join(data, "twist_buckling_rates.csv")
+    if os.path.exists(rates_path):
+        r = read(rates_path)
+        for i, n in enumerate(sorted(set(r["segments"]))):
+            rows = [k for k, v in enumerate(r["segments"]) if v == n and r["sigma"][k] > 0]
+            ax0.plot([r["phi"][k] for k in rows], [r["sigma"][k] ** 2 for k in rows], "o-",
+                     color=T["series"][i], linewidth=1.8, markersize=5, label=f"n = {int(n)}")
+        ax0.axvline(ref, color=T["guide"], linestyle="--", linewidth=1)
+        ax0.annotate(f"theory {ref:.3f} rad", (ref, 0.95), xycoords=("data", "axes fraction"),
+                     color=T["guide"], fontsize=8, xytext=(4, 0), textcoords="offset points")
+        style(ax0, r"Growth rate above threshold: $\sigma^2$ extrapolates to $\Phi_{crit}$",
+              r"end rotation $\Phi$ [rad]", r"$\sigma^2$ [1/s$^2$]")
+        legend(ax0)
     ax1.loglog(d["h"], d["rel_err"], "o-", color=T["series"][0], linewidth=2, markersize=6)
-    guide(ax1, d["h"], d["rel_err"], 1)
-    style(ax1, "Threshold error", "element length $h$ [m]", "relative error")
+    guide(ax1, d["h"], d["rel_err"], 2)
+    style(ax1, "Threshold error vs mesh", "element length $h$ [m]", "relative error")
     save(fig, figs, "twist_buckling.png")
 
 
@@ -473,6 +492,7 @@ PLOTS = {
     "cantilever_convergence.csv": plot_cantilever,
     "elastica_moment.csv": plot_moment,
     "elastica_tipload.csv": plot_tipload,
+    "elastica_tipload_convergence.csv": plot_tipload_convergence,
     "energy_drift.csv": plot_energy,
     "energy_dissipation.csv": plot_dissipation,
     "twist_buckling.csv": plot_twist,
