@@ -119,7 +119,7 @@ segments are halved in length, as the theory says it should.
 | Rod bent into a circle by an end moment | exact circle, radius `EI/M` | error **1e-4** at 128 segments, slope **2.01** |
 | Large bending under a tip load | exact elastica | tip within **0.06%** of rod length; converges at slope **1.96** to the extensible elastica |
 | Rod with built-in curvature and twist | exact helix | radius to **2e-10**, pitch to **5e-4** |
-| Twisted rod buckling | Michell/Greenhill threshold | **2.3%** at 32 segments, converging |
+| Twisted rod buckling | Michell/Greenhill threshold | **0.18%** at 48 segments, second order |
 | Resting on plane, sphere, capsule, box | exact geometry | **2e-16** |
 | Block on a slope | slips at `tan α = μ` | within **1.5%** |
 | Rope wrapped around a post (capstan) | `T₂/T₁ = e^{μθ}` | within **1.6%**, 0.25 to 1 turn; **0.7%** for μ = 0.1 to 0.75 |
@@ -189,8 +189,8 @@ python tools\make_video.py              :: scenes + figures -> out\video\demo.mp
 python tools\reference_prototype.py     :: cross-check against the NumPy version
 ```
 
-The full suite takes about 17 minutes; almost all of that is twist buckling and
-the capstan sweep. Python tools need `numpy`, `matplotlib`, `Pillow` and
+The full suite takes a quarter of an hour; most of that is twist buckling and
+the capstan cases. Python tools need `numpy`, `matplotlib`, `Pillow` and
 `imageio-ffmpeg`.
 
 ---

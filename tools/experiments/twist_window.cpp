@@ -51,7 +51,7 @@ Rod twistedRod(int n, double phi) {
 SolverParams params() {
     SolverParams p;
     p.dt = Real(1e-3);
-    p.substeps = 256;
+    p.substeps = std::getenv("CRS_SUBSTEPS") ? std::atoi(std::getenv("CRS_SUBSTEPS")) : 256;
     p.iterations = 1;
     p.gravity = Vec3();
     return p;

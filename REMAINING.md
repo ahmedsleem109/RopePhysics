@@ -47,10 +47,11 @@ Nsight-profile the learning batch.
 - **Friction creep:** a cable resting on a bar creeps ~2 mm/s even at 2x the
   needed friction (per-particle contact ratcheting). Try segment-based contact
   or a static-friction anchor per contact; it biases hold/slip answers.
-- **Validation gaps:** tip-load and twist-buckling mesh sweeps beyond n=32
-  (twist buckling converges at slope 0.82 — explain or improve); timestep
-  envelope beyond one scenario (contact-driven, whipping); contact torque
-  (rolling / torsional friction); segment-based rod–primitive contact.
+- **Validation gaps:** the short-element regime of the timestep rule; contact
+  torque (rolling / torsional friction); segment-based rod–primitive contact.
+  Done 2026-09-17: tip-load sweep to n = 256 (slope 1.96 vs Reissner),
+  `timestep-motions` (swing/drop/whip), twist buckling by growth rate (0.18% at
+  n = 48, second order; the old slope 0.82 was the detection window).
   Done 2026-09-17: `capstan-mu` (μ 0.1–0.75, worst 0.71%) and
   `timestep-convergence` (first order in the substep, observed 1.00).
 - **CI:** consider a shorter per-commit suite (twist buckling 9 min, capstan
@@ -142,10 +143,9 @@ compile; they have never executed.
       will go red on the two stability cases until they are redesigned.
       Consider shortening twist buckling / capstan for per-commit runs.
 - [x] Timestep-refinement convergence study (`timestep-convergence`: first order).
-- [ ] Extend mesh sweeps: cantilever (n = 256), moment (n = 128) and tip load
-      (n = 256, slope 1.96 vs Reissner's extensible elastica) done; twist buckling
-      still at n = 32. Twist buckling converges at slope 0.82 (first
-      order) — explain or improve.
+- [x] Extend mesh sweeps: cantilever (n = 256), moment (n = 128), tip load
+      (n = 256, slope 1.96 vs Reissner's extensible elastica), twist buckling
+      (n = 48, second order by growth rate).
 - [x] Stability rule across motions (`timestep-motions`: swing, drop, whip; 1-6%
       of an element per substep; contact 3-5x tighter by landing speed).
 - [ ] The short-element regime (elements shorter than the rod diameter).

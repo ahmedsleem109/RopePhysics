@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <thread>
 
 #include "../core/solver.h"
 #include "../core/statics.h"
@@ -576,12 +577,17 @@ CaseResult runHelix(const std::string& outDir) {
 //
 //     Phi_crit = 8.986819 EI / GJ = 8.986819 (1 + nu)
 //
-// Fixing both end positions makes the bifurcation supercritical: above the
-// threshold the amplitude is limited by the axial strain that bowing costs, so
-// it grows smoothly like sqrt(Phi - Phi_crit) instead of running away. That is
-// what makes the threshold measurable rather than merely bracketable: a^2 is
-// linear in Phi near onset, so extrapolating it to zero locates Phi_crit
-// without ever having to pick an arbitrary "has buckled" amplitude.
+// Locating the threshold. Above it a small lateral perturbation grows as
+// e^(sigma t), and for this undamped system sigma^2 crosses zero smoothly at
+// Phi_crit. So the case measures sigma at several twists above the threshold
+// and extrapolates sigma^2 (a quadratic in Phi) to zero.
+//
+// It used to bisect on "the seed grew 100x within 4 s" instead, and that
+// reported 2.3% at n = 32, converging at slope 0.82. Both numbers were the
+// window, not the rod: sigma goes like sqrt(Phi - Phi_crit), so a finite
+// window T overshoots by ~1/T^2. At n = 32 the same bisection gave +2.41%,
+// +0.85% and +0.47% for 4, 8 and 16 s windows (tools/experiments/
+// twist_window.cpp), converging on the +0.38% the growth rate gives directly.
 CaseResult runTwistBuckling(const std::string& outDir) {
     CaseResult res;
     res.name = "Michell/Greenhill twist buckling threshold";
@@ -611,9 +617,11 @@ CaseResult runTwistBuckling(const std::string& outDir) {
     // the requirement that alpha/h^2 dominate J M^-1 J^T, which for this rod
     // means h of a few microseconds; that is affordable precisely because
     // honest dynamics does not need the quadratic sweep budget a converged
-    // static solve does.
-    const int steps = 4000;
-    const int substeps = 256;
+    // static solve does. The substep shrinks with the element (16 n per ms, 256
+    // at n = 32): at n = 48, 256 substeps left a 0.013% time error in a 0.18%
+    // threshold error and bent the convergence plot.
+    const int maxSteps = 30000;  // 30 s cap; the slowest growth used takes ~8 s
+    auto substepsFor = [](int n) { return 16 * n; };
 
     auto twistedRod = [&](int n, double phi) {
         Rod rod = makeStraightRod(n, L, mat, Vec3(0, 0, 0), Vec3(0, 0, 1));
@@ -640,7 +648,10 @@ CaseResult runTwistBuckling(const std::string& outDir) {
         return rod;
     };
 
-    auto amplitudeAt = [&](int n, double phi) {
+    // Growth rate from the time the lateral amplitude takes to go from 1e-5 to
+    // 1e-3 m: well past the 1e-7 seed's transient, well short of the ~1e-2 m at
+    // which the fixed end positions saturate it. 0 if it never gets there.
+    auto growthRate = [&](int n, double phi) {
         Rod rod = twistedRod(n, phi);
         for (std::size_t i = 1; i + 1 < rod.state.numParticles(); ++i)
             rod.state.x[i].x += seed * std::sin(kPi * rod.state.x[i].z / L);
@@ -648,25 +659,23 @@ CaseResult runTwistBuckling(const std::string& outDir) {
 
         SolverParams p;
         p.dt = Real(1e-3);
-        p.substeps = substeps;
+        p.substeps = substepsFor(n);
         p.iterations = 1;
         p.gravity = Vec3();
 
-        double amp = 0;
-        for (int i = 0; i < steps; ++i) {
+        double t1 = -1;
+        for (int i = 1; i <= maxSteps; ++i) {
             step(rod, p);
-            // Track the largest excursion over the whole window, not just the
-            // final one: below threshold the seed oscillates rather than decays,
-            // so the endpoint alone is a noisy thing to threshold on.
-            for (const Vec3& x : rod.state.x)
-                amp = std::max(amp, std::sqrt(x.x * x.x + x.y * x.y));
-            if (amp > 0.05) break;  // unambiguously buckled; no need to continue
+            double amp = 0;
+            for (const Vec3& x : rod.state.x) amp = std::max(amp, std::sqrt(x.x * x.x + x.y * x.y));
+            if (t1 < 0 && amp > 1e-5) t1 = i * double(p.dt);
+            if (amp > 1e-3) return std::log(100.0) / (i * double(p.dt) - t1);
         }
-        return amp;
+        return 0.0;
     };
 
-    Csv csv(outDir, "twist_buckling.csv",
-            "segments,h,phi_crit,phi_crit_ref,rel_err,amp_below,amp_above");
+    Csv csv(outDir, "twist_buckling.csv", "segments,h,phi_crit,phi_crit_ref,rel_err,rates_used");
+    Csv rates(outDir, "twist_buckling_rates.csv", "segments,phi,overshoot,sigma");
 
     // Guard on the base state before trusting any threshold read off it. A
     // uniformly twisted rod's stored energy has a closed form in the DISCRETE
@@ -702,38 +711,82 @@ CaseResult runTwistBuckling(const std::string& outDir) {
             makeCheck("twisted base state stores the right energy", stored, discrete, 0.002));
     }
 
-    const double buckled = 100.0 * double(seed);  // four orders below the saturated amplitude
-    const std::vector<int> counts = {12, 16, 24, 32};
-    std::vector<double> hs, errs;
-    double finest = 0;
+    // Twists 2-12% above the continuum threshold. The coarsest mesh's own
+    // threshold is above the lowest of them, which then does not grow and is
+    // left out of its fit.
+    const std::vector<int> counts = {16, 24, 32, 48};
+    const std::vector<double> overshoots = {0.02, 0.04, 0.06, 0.08, 0.10, 0.12};
+    std::vector<std::vector<double>> sigma(counts.size(), std::vector<double>(overshoots.size()));
+    {
+        std::vector<std::thread> pool;
+        for (std::size_t a = 0; a < counts.size(); ++a)
+            for (std::size_t b = 0; b < overshoots.size(); ++b)
+                pool.emplace_back([&, a, b] {
+                    sigma[a][b] = growthRate(counts[a], phiCritRef * (1 + overshoots[b]));
+                });
+        for (std::thread& t : pool) t.join();
+    }
 
-    for (int n : counts) {
-        // Bracket, then bisect. The lower bracket is known not to buckle and the
-        // upper is known to.
-        double lo = 0.5 * phiCritRef, hi = 1.6 * phiCritRef;
-        const double ampLo = amplitudeAt(n, lo), ampHi = amplitudeAt(n, hi);
-        for (int it = 0; it < 9; ++it) {
-            const double mid = 0.5 * (lo + hi);
-            if (amplitudeAt(n, mid) > buckled)
-                hi = mid;
-            else
-                lo = mid;
+    std::vector<double> hs, errs;
+    bool allFitted = true;
+    for (std::size_t a = 0; a < counts.size(); ++a) {
+        const int n = counts[a];
+        // Least-squares quadratic sigma^2(Phi), in u = Phi / Phi_ref - 1 for
+        // conditioning, then its root nearest the reference.
+        double S[5] = {0, 0, 0, 0, 0}, T3[3] = {0, 0, 0};
+        int used = 0;
+        for (std::size_t b = 0; b < overshoots.size(); ++b) {
+            rates.row(n, phiCritRef * (1 + overshoots[b]), overshoots[b], sigma[a][b]);
+            if (sigma[a][b] <= 0) continue;
+            const double u = overshoots[b], y = sigma[a][b] * sigma[a][b];
+            double uk = 1;
+            for (int k = 0; k < 5; ++k, uk *= u) S[k] += uk;
+            T3[0] += y, T3[1] += y * u, T3[2] += y * u * u;
+            ++used;
         }
-        const double phiCrit = 0.5 * (lo + hi);
+        if (used < 4) {
+            allFitted = false;
+            continue;
+        }
+        // Normal equations for y = c0 + c1 u + c2 u^2, by Cramer's rule.
+        auto det3 = [](double m[3][3]) {
+            return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+                   m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                   m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        };
+        double A[3][3] = {{S[0], S[1], S[2]}, {S[1], S[2], S[3]}, {S[2], S[3], S[4]}};
+        const double D = det3(A);
+        double c[3];
+        for (int k = 0; k < 3; ++k) {
+            double M[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int q = 0; q < 3; ++q) M[r][q] = q == k ? T3[r] : A[r][q];
+            c[k] = det3(M) / D;
+        }
+        // sigma^2 rises through zero at the threshold: the root where the
+        // slope is positive.
+        const double disc = std::sqrt(std::max(0.0, c[1] * c[1] - 4 * c[2] * c[0]));
+        const double r1 = (-c[1] + disc) / (2 * c[2]), r2 = (-c[1] - disc) / (2 * c[2]);
+        const double root = (c[1] + 2 * c[2] * r1 > 0) ? r1 : r2;
+        const double phiCrit = phiCritRef * (1 + root);
         const double err = std::abs(phiCrit - phiCritRef) / phiCritRef;
         hs.push_back(L / n);
         errs.push_back(err);
-        finest = err;
-        csv.row(n, L / n, phiCrit, phiCritRef, err, ampLo, ampHi);
+        csv.row(n, L / n, phiCrit, phiCritRef, err, used);
+        res.notes.push_back(fmt("  n=%.0f: Phi_crit = %.5f rad, %.3g relative error", double(n),
+                                phiCrit, err));
     }
 
-    const double slope = logLogSlope(hs, errs);
     res.notes.push_back(fmt("  clamped-clamped: M_crit L / EI = %.6f, so Phi_crit = %.5f rad "
                             "(%.4f turns)", thetaCrit, phiCritRef, phiCritRef / (2 * kPi)));
-    res.notes.push_back(fmt("  threshold error %.3g at the finest mesh, converging at slope %.2f "
-                            "in h", finest, slope));
-    res.checks.push_back(makeCheck("buckling threshold (finest mesh)", finest, 0.0, 0.05, 1.0));
-    res.checks.push_back(makeRangeCheck("threshold convergence order in h", slope, 0.8, 3.0));
+    res.checks.push_back(makeCheck("growth rate fitted on every mesh", allFitted ? 1.0 : 0.0, 1.0, 0.0));
+    if (errs.size() == counts.size()) {
+        const double slope = logLogSlope(hs, errs);
+        res.notes.push_back(fmt("  threshold error %.3g at the finest mesh, converging at slope %.2f "
+                                "in h", errs.back(), slope));
+        res.checks.push_back(makeCheck("buckling threshold (finest mesh)", errs.back(), 0.0, 0.01, 1.0));
+        res.checks.push_back(makeRangeCheck("threshold convergence order in h", slope, 1.7, 2.3));
+    }
     return res;
 }
 
